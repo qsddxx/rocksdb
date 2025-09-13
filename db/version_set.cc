@@ -2854,17 +2854,17 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
                   PinnedIteratorsManager* pinned_iters_mgr, bool* value_found,
                   bool* key_exists, SequenceNumber* seq, ReadCallback* callback,
                   bool* is_blob, bool do_merge) {
-  Slice ikey = k.internal_key();
+  Slice ikey = k.internal_key();// 提取内部键和用户键
   Slice user_key = k.user_key();
 
   assert(status->ok() || status->IsMergeInProgress());
 
-  if (key_exists != nullptr) {
+  if (key_exists != nullptr) {// 初始化key_exists为true（如果找不到会设为false）
     // will falsify below if not found
     *key_exists = true;
   }
 
-  uint64_t tracing_get_id = BlockCacheTraceHelper::kReservedGetId;
+  uint64_t tracing_get_id = BlockCacheTraceHelper::kReservedGetId;// 设置块缓存追踪ID（用于性能分析）
   if (vset_ && vset_->block_cache_tracer_ &&
       vset_->block_cache_tracer_->is_tracing_enabled()) {
     tracing_get_id = vset_->block_cache_tracer_->NextGetId();
@@ -2873,9 +2873,9 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
   // Note: the old StackableDB-based BlobDB passes in
   // GetImplOptions::is_blob_index; for the integrated BlobDB implementation, we
   // need to provide it here.
-  bool is_blob_index = false;
+  bool is_blob_index = false;// 处理Blob索引标识
   bool* const is_blob_to_use = is_blob ? is_blob : &is_blob_index;
-  BlobFetcher blob_fetcher(this, read_options);
+  BlobFetcher blob_fetcher(this, read_options);// 创建Blob数据获取器
 
   assert(pinned_iters_mgr);
   GetContext get_context(
@@ -2885,48 +2885,44 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
       do_merge ? timestamp : nullptr, value_found, merge_context, do_merge,
       max_covering_tombstone_seq, clock_, seq,
       merge_operator_ ? pinned_iters_mgr : nullptr, callback, is_blob_to_use,
-      tracing_get_id, &blob_fetcher);
+      tracing_get_id, &blob_fetcher);// 初始化获取上下文
 
   // Pin blocks that we read to hold merge operands
-  if (merge_operator_) {
+  if (merge_operator_) { // 如果需要合并操作，固定迭代器块以保存合并操作数
     pinned_iters_mgr->StartPinning();
   }
-  SegmentPicker sp(user_key,ikey,storage_info_.GetSegments(),user_comparator(),internal_comparator());
-  Segment* s = sp.GetNextSegment();
-  while(s!=nullptr)
-  {
-    FilePicker fp(user_key, ikey, &s->level_files_brief_,
-                s->GetLevelNum(),
-                &s->file_indexer_, user_comparator(),
-                internal_comparator());
-    FdWithKeyRange* f = fp.GetNextFile();
 
-  while (f != nullptr) 
-  {
-    if (*max_covering_tombstone_seq > 0) {
+  FilePicker fp(user_key, ikey, &storage_info_.level_files_brief_,
+                storage_info_.num_non_empty_levels_,
+                &storage_info_.file_indexer_, user_comparator(),
+                internal_comparator());// 创建文件选择器（确定搜索路径）
+  FdWithKeyRange* f = fp.GetNextFile();// 获取第一个候选文件
+
+  while (f != nullptr) {// 遍历所有候选文件
+    if (*max_covering_tombstone_seq > 0) {// 如果已有覆盖墓碑序列号大于0，说明键已被删除
       // The remaining files we look at will only contain covered keys, so we
       // stop here.
-      break;
+      break;// 提前终止搜索
     }
-    if (get_context.sample()) {
+    if (get_context.sample()) { // 采样文件读取统计
       sample_file_read_inc(f->file_metadata);
     }
 
     bool timer_enabled =
         GetPerfLevel() >= PerfLevel::kEnableTimeExceptForMutex &&
         get_perf_context()->per_level_perf_context_enabled;
-    StopWatchNano timer(clock_, timer_enabled /* auto_start */);
+    StopWatchNano timer(clock_, timer_enabled /* auto_start */);// 准备性能计时器
     *status = table_cache_->Get(
         read_options, *internal_comparator(), *f->file_metadata, ikey,
         &get_context, mutable_cf_options_,
         cfd_->internal_stats()->GetFileReadHist(fp.GetHitFileLevel()),
         IsFilterSkipped(static_cast<int>(fp.GetHitFileLevel()),
                         fp.IsHitFileLastInLevel()),
-        fp.GetHitFileLevel(), max_file_size_for_l0_meta_pin_);
+        fp.GetHitFileLevel(), max_file_size_for_l0_meta_pin_); // 从表缓存中获取键值
     // TODO: examine the behavior for corrupted key
     if (timer_enabled) {
       PERF_COUNTER_BY_LEVEL_ADD(get_from_table_nanos, timer.ElapsedNanos(),
-                                fp.GetHitFileLevel());
+                                fp.GetHitFileLevel());// 记录表读取耗时
     }
     if (!status->ok()) {
       if (db_statistics_ != nullptr) {
@@ -2939,17 +2935,17 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
     if (get_context.State() != GetContext::kNotFound &&
         get_context.State() != GetContext::kMerge &&
         db_statistics_ != nullptr) {
-      get_context.ReportCounters();
+      get_context.ReportCounters();// 在返回前报告计数器（找到值或合并状态）
     }
     switch (get_context.State()) {
       case GetContext::kNotFound:
         // Keep searching in other files
-        break;
+        break;// 继续在其他文件中搜索
       case GetContext::kMerge:
         // TODO: update per-level perfcontext user_key_return_count for kMerge
-        break;
+        break;// 收集合并操作数，继续搜索
       case GetContext::kFound:
-        if (fp.GetHitFileLevel() == 0) {
+        if (fp.GetHitFileLevel() == 0) { // 更新层级命中统计
           RecordTick(db_statistics_, GET_HIT_L0);
         } else if (fp.GetHitFileLevel() == 1) {
           RecordTick(db_statistics_, GET_HIT_L1);
@@ -2960,7 +2956,7 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         PERF_COUNTER_BY_LEVEL_ADD(user_key_return_count, 1,
                                   fp.GetHitFileLevel());
 
-        if (is_blob_index && do_merge && (value || columns)) {
+        if (is_blob_index && do_merge && (value || columns)) {// 处理Blob索引值
           Slice blob_index =
               value ? *value
                     : WideColumnsHelper::GetDefaultColumn(columns->columns());
@@ -3009,26 +3005,24 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         *status = Status::Corruption(Status::SubCode::kMergeOperatorFailed);
         return;
     }
-    f = fp.GetNextFile();
-  }
-  s = sp.GetNextSegment();
+    f = fp.GetNextFile();// 获取下一个候选文件
   }
   if (db_statistics_ != nullptr) {
-    get_context.ReportCounters();
+    get_context.ReportCounters();// 搜索完所有文件后处理最终状态
   }
-  if (GetContext::kMerge == get_context.State()) {
+  if (GetContext::kMerge == get_context.State()) {// 处理合并操作数状态
     if (!do_merge) {
-      *status = Status::OK();
+      *status = Status::OK();// 不执行合并，直接返回OK
       return;
     }
     if (!merge_operator_) {
       *status = Status::InvalidArgument(
-          "merge_operator is not properly initialized.");
+          "merge_operator is not properly initialized.");// 合并操作符未初始化
       return;
     }
     // merge_operands are in saver and we hit the beginning of the key history
     // do a final merge of nullptr and operands;
-    if (value || columns) {
+    if (value || columns) {// 执行最终合并
       // `op_failure_scope` (an output parameter) is not provided (set to
       // nullptr) since a failure must be propagated regardless of its value.
       *status = MergeHelper::TimedFullMerge(
@@ -3042,7 +3036,7 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         }
       }
     }
-  } else {
+  } else {// 键不存在的情况
     if (key_exists != nullptr) {
       *key_exists = false;
     }
@@ -3103,21 +3097,16 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
 #endif  // USE_COROUTINES
   {
     MultiGetRange file_picker_range(*range, range->begin(), range->end());
-    SegmentPickerMultiGet sp(&file_picker_range,storage_info_.GetSegments(),user_comparator(),internal_comparator());
-    Segment* spp = sp.GetNextSegment();
+    FilePickerMultiGet fp(&file_picker_range, &storage_info_.level_files_brief_,
+                          storage_info_.num_non_empty_levels_,
+                          &storage_info_.file_indexer_, user_comparator(),
+                          internal_comparator());
+    FdWithKeyRange* f = fp.GetNextFileInLevel();
     uint64_t num_index_read = 0;
     uint64_t num_filter_read = 0;
     uint64_t num_sst_read = 0;
     uint64_t num_level_read = 0;
-    FdWithKeyRange* f;
-    while(spp!=nullptr)
-    {
-    FilePickerMultiGet fp(&file_picker_range, &spp->level_files_brief_,
-                          spp->GetLevelNum(),
-                          &storage_info_.file_indexer_, user_comparator(),
-                          internal_comparator()); 
-    f = fp.GetNextFileInLevel();
-    
+
     int prev_level = -1;
 
     while (!fp.IsSearchEnded()) {
@@ -3190,10 +3179,9 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
           RecordTick(db_statistics_, MULTIGET_COROUTINE_COUNT,
                      mget_tasks.size());
           // Collect all results so far
-          std::vector<Status> statuses =
-              folly::coro::blockingWait(co_withExecutor(
-                  &range->context()->executor(),
-                  folly::coro::collectAllRange(std::move(mget_tasks))));
+          std::vector<Status> statuses = folly::coro::blockingWait(
+              folly::coro::collectAllRange(std::move(mget_tasks))
+                  .scheduleOn(&range->context()->executor()));
           if (s.ok()) {
             for (Status stat : statuses) {
               if (!stat.ok()) {
@@ -3241,7 +3229,7 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
         prev_level = fp.GetHitFileLevel();
       }
     }
-  }
+
     // Dump stats for most recent level
     if (num_filter_read + num_index_read) {
       RecordInHistogram(db_statistics_,
@@ -3321,38 +3309,38 @@ Status Version::ProcessBatch(
     std::deque<size_t>& to_process, unsigned int& num_tasks_queued,
     std::unordered_map<int, std::tuple<uint64_t, uint64_t, uint64_t>>&
         mget_stats) {
-  FilePickerMultiGet& fp = *batch;
-  MultiGetRange range = fp.GetRange();
+  FilePickerMultiGet& fp = *batch;// 获取当前批次的引用
+  MultiGetRange range = fp.GetRange();// 获取当前批次中待处理的键范围
   // Initialize a new empty range. Any keys that are not in this level will
   // eventually become part of the new range.
-  MultiGetRange leftover(range, range.begin(), range.begin());
-  FdWithKeyRange* f = nullptr;
+  MultiGetRange leftover(range, range.begin(), range.begin());// 创建新范围存放不在当前层级的键（初始为空）
+  FdWithKeyRange* f = nullptr;// 当前处理的文件
   Status s;
 
-  f = fp.GetNextFileInLevel();
+  f = fp.GetNextFileInLevel();// 获取当前层级的第一个文件
   while (!f) {
-    fp.PrepareNextLevelForSearch();
+    fp.PrepareNextLevelForSearch();// 准备下一层级
     if (!fp.IsSearchEnded()) {
-      f = fp.GetNextFileInLevel();
+      f = fp.GetNextFileInLevel();// 获取新层级的文件
     } else {
       break;
     }
   }
-  while (f) {
-    MultiGetRange file_range = fp.CurrentFileRange();
-    TableCache::TypedHandle* table_handle = nullptr;
+  while (f) {// 遍历当前层级的所有文件
+    MultiGetRange file_range = fp.CurrentFileRange();// 获取当前文件中可能包含的键范围
+    TableCache::TypedHandle* table_handle = nullptr;// 表缓存句柄
     bool skip_filters = IsFilterSkipped(static_cast<int>(fp.GetHitFileLevel()),
-                                        fp.IsHitFileLastInLevel());
+                                        fp.IsHitFileLastInLevel());// 检查是否跳过过滤器和范围删除
     bool skip_range_deletions = false;
-    if (!skip_filters) {
+    if (!skip_filters) {// 尝试预加载过滤器
       Status status = table_cache_->MultiGetFilter(
           read_options, *internal_comparator(), *f->file_metadata,
           mutable_cf_options_,
           cfd_->internal_stats()->GetFileReadHist(fp.GetHitFileLevel()),
           fp.GetHitFileLevel(), &file_range, &table_handle);
       if (status.ok()) {
-        skip_filters = true;
-        skip_range_deletions = true;
+        skip_filters = true;// 过滤器已加载
+        skip_range_deletions = true;// 可跳过范围删除检查
       } else if (!status.IsNotSupported()) {
         s = status;
       }
@@ -3367,27 +3355,27 @@ Status Version::ProcessBatch(
     // definitely not in this level.
     // Subtract the complement of file_range from range, since they will be
     // processed in a separate batch in parallel.
-    leftover += ~file_range;
-    range -= ~file_range;
-    if (!file_range.empty()) {
-      int level = fp.GetHitFileLevel();
-      auto stat = mget_stats.find(level);
+    leftover += ~file_range;// 将不在file_range的键加入leftover（肯定不在此层级）
+    range -= ~file_range;// 此时file_range包含可能在此文件的键（可能有假阳性）
+    if (!file_range.empty()) {// 如果当前文件有候选键
+      int level = fp.GetHitFileLevel();// 当前层级
+      auto stat = mget_stats.find(level);// 获取或创建层级统计
       if (stat == mget_stats.end()) {
-        auto entry = mget_stats.insert({level, {0, 0, 0}});
+        auto entry = mget_stats.insert({level, {0, 0, 0}});// 插入新层级统计（过滤器块数，索引块数，SST读取数）
         assert(entry.second);
         stat = entry.first;
       }
 
       if (waiting.empty() && to_process.empty() &&
           !fp.RemainingOverlapInLevel() && leftover.empty() &&
-          mget_tasks.empty()) {
+          mget_tasks.empty()) {// 检查是否满足快速路径条件（所有键在单个文件）
         // All keys are in one SST file, so take the fast path
         s = MultiGetFromSST(read_options, file_range, fp.GetHitFileLevel(),
                             skip_filters, skip_range_deletions, f, *blob_ctxs,
                             table_handle, std::get<0>(stat->second),
                             std::get<1>(stat->second),
-                            std::get<2>(stat->second));
-      } else {
+                            std::get<2>(stat->second)); // 快速路径：同步读取SST文件
+      } else {// 标准路径：创建协程任务异步读取
         mget_tasks.emplace_back(MultiGetFromSSTCoroutine(
             read_options, file_range, fp.GetHitFileLevel(), skip_filters,
             skip_range_deletions, f, *blob_ctxs, table_handle,
@@ -3396,18 +3384,18 @@ Status Version::ProcessBatch(
         ++num_tasks_queued;
       }
     }
-    if (fp.KeyMaySpanNextFile() && !file_range.empty()) {
-      break;
+    if (fp.KeyMaySpanNextFile() && !file_range.empty()) {// 检查键是否可能跨文件（当前文件末尾的键）
+      break;// 暂停当前层级处理
     }
-    f = fp.GetNextFileInLevel();
+    f = fp.GetNextFileInLevel();// 获取下一个文件
   }
   // Split the current batch only if some keys are likely in this level and
   // some are not. Only split if we're done with this level, i.e f is null.
   // Otherwise, it means there are more files in this level to look at.
-  if (s.ok() && !f && !leftover.empty() && !range.empty()) {
-    fp.ReplaceRange(range);
-    batches.emplace_back(&leftover, fp);
-    to_process.emplace_back(batches.size() - 1);
+  if (s.ok() && !f && !leftover.empty() && !range.empty()) {// 处理批次拆分（当有键不在此层级）
+    fp.ReplaceRange(range);// 更新当前批次范围（仅包含可能在此层级的键）
+    batches.emplace_back(&leftover, fp);// 创建新批次处理不在此层级的键
+    to_process.emplace_back(batches.size() - 1);// 将新批次加入待处理队列
   }
   // 1. If f is non-null, that means we might not be done with this level.
   //    This can happen if one of the keys is the last key in the file, i.e
@@ -3417,7 +3405,7 @@ Status Version::ProcessBatch(
   // 3. If some tasks were queued for this range, then the next level will be
   //    prepared after executing those tasks
   if (!f && !range.empty() && !num_tasks_queued) {
-    fp.PrepareNextLevelForSearch();
+    fp.PrepareNextLevelForSearch();// 准备下一层级搜索
   }
   return s;
 }
@@ -3425,65 +3413,65 @@ Status Version::ProcessBatch(
 Status Version::MultiGetAsync(
     const ReadOptions& options, MultiGetRange* range,
     std::unordered_map<uint64_t, BlobReadContexts>* blob_ctxs) {
-  autovector<FilePickerMultiGet, 4> batches;
-  std::deque<size_t> waiting;
-  std::deque<size_t> to_process;
+  autovector<FilePickerMultiGet, 4> batches;// 批次容器（最多4个预分配空间）
+  std::deque<size_t> waiting;// 等待协程完成的批次索引
+  std::deque<size_t> to_process;// 待处理的批次索引
   Status s;
-  std::vector<folly::coro::Task<Status>> mget_tasks;
-  std::unordered_map<int, std::tuple<uint64_t, uint64_t, uint64_t>> mget_stats;
+  std::vector<folly::coro::Task<Status>> mget_tasks;// 协程任务集合
+  std::unordered_map<int, std::tuple<uint64_t, uint64_t, uint64_t>> mget_stats;// 统计信息映射 [层级 -> (过滤器块数, 索引块数, SST读取数)]
 
   // Create the initial batch with the input range
   batches.emplace_back(range, &storage_info_.level_files_brief_,
                        storage_info_.num_non_empty_levels_,
                        &storage_info_.file_indexer_, user_comparator(),
-                       internal_comparator());
-  to_process.emplace_back(0);
-
+                       internal_comparator());// 创建初始批次（包含所有输入键）
+  to_process.emplace_back(0);// 将初始批次加入处理队列
+// 主处理循环（处理所有批次）
   while (!to_process.empty()) {
     // As we process a batch, it may get split into two. So reserve space for
     // an additional batch in the autovector in order to prevent later moves
     // of elements in ProcessBatch().
-    batches.reserve(batches.size() + 1);
-
+    batches.reserve(batches.size() + 1); // 预留空间防止元素移动（处理中可能拆分出新批次）
+// 获取下一个待处理批次
     size_t idx = to_process.front();
     FilePickerMultiGet* batch = &batches.at(idx);
-    unsigned int num_tasks_queued = 0;
-    to_process.pop_front();
-    if (batch->IsSearchEnded() || batch->GetRange().empty()) {
+    unsigned int num_tasks_queued = 0;// 本批次创建的协程任务数
+    to_process.pop_front();// 从队列移除
+    if (batch->IsSearchEnded() || batch->GetRange().empty()) {// 检查批次是否已完成搜索或为空
       // If to_process is empty, i.e no more batches to look at, then we need
       // schedule the enqueued coroutines and wait for them. Otherwise, we
       // skip this batch and move to the next one in to_process.
       if (!to_process.empty()) {
-        continue;
+        continue;// 如果还有待处理批次，跳过当前批次
       }
     } else {
       // Look through one level. This may split the batch and enqueue it to
       // to_process
       s = ProcessBatch(options, batch, mget_tasks, blob_ctxs, batches, waiting,
-                       to_process, num_tasks_queued, mget_stats);
+                       to_process, num_tasks_queued, mget_stats);// 处理当前批次（可能拆分批次并加入队列）
       // If ProcessBatch didn't enqueue any coroutine tasks, it means all
       // keys were filtered out. So put the batch back in to_process to
       // lookup in the next level
-      if (!num_tasks_queued && !batch->IsSearchEnded()) {
+      if (!num_tasks_queued && !batch->IsSearchEnded()) {// 处理未创建任务的情况（所有键被过滤）
+
         // Put this back in the processing queue
-        to_process.emplace_back(idx);
+        to_process.emplace_back(idx);// 将批次放回处理队列（在下一层级继续）
       } else if (num_tasks_queued) {
-        waiting.emplace_back(idx);
+        waiting.emplace_back(idx);// 将批次加入等待队列（协程执行中）
       }
     }
     // If ProcessBatch() returned an error, then schedule the enqueued
     // coroutines and wait for them, then abort the MultiGet.
-    if (to_process.empty() || !s.ok()) {
+    if (to_process.empty() || !s.ok()) {// 检查是否需要执行协程（无更多批次或出错）
       if (mget_tasks.size() > 0) {
-        assert(waiting.size());
-        RecordTick(db_statistics_, MULTIGET_COROUTINE_COUNT, mget_tasks.size());
+        assert(waiting.size());// 等待队列不应为空
+        RecordTick(db_statistics_, MULTIGET_COROUTINE_COUNT, mget_tasks.size());// 记录协程数量统计
         // Collect all results so far
-        std::vector<Status> statuses =
-            folly::coro::blockingWait(co_withExecutor(
-                &range->context()->executor(),
-                folly::coro::collectAllRange(std::move(mget_tasks))));
-        mget_tasks.clear();
-        if (s.ok()) {
+        std::vector<Status> statuses = folly::coro::blockingWait(
+            folly::coro::collectAllRange(std::move(mget_tasks))
+                .scheduleOn(&range->context()->executor()));// 执行所有协程任务并收集结果
+        mget_tasks.clear();// 清空任务列表
+        if (s.ok()) {// 检查协程执行状态
           for (Status stat : statuses) {
             if (!stat.ok()) {
               s = std::move(stat);
@@ -3496,30 +3484,30 @@ Status Version::MultiGetAsync(
           break;
         }
 
-        for (size_t wait_idx : waiting) {
+        for (size_t wait_idx : waiting) {// 处理等待队列中的批次
           FilePickerMultiGet& fp = batches.at(wait_idx);
           // 1. If fp.GetHitFile() is non-null, then there could be more
           // overlap in this level. So skip preparing next level.
           // 2. If fp.GetRange() is empty, then this batch is completed
           // and no need to prepare the next level.
-          if (!fp.GetHitFile() && !fp.GetRange().empty()) {
+          if (!fp.GetHitFile() && !fp.GetRange().empty()) {// 准备下一层级
             fp.PrepareNextLevelForSearch();
           }
         }
-        to_process.swap(waiting);
+        to_process.swap(waiting);// 将等待队列转为待处理队列
       } else {
         assert(!s.ok() || waiting.size() == 0);
       }
     }
     if (!s.ok()) {
-      break;
+      break;// 无任务时确保等待队列为空
     }
   }
 
-  uint64_t num_levels = 0;
+  uint64_t num_levels = 0;// 涉及的总层级数
   for (auto& stat : mget_stats) {
-    if (stat.first == 0) {
-      num_levels += std::get<2>(stat.second);
+    if (stat.first == 0) {// 特殊处理L0（可能包含多个文件）
+      num_levels += std::get<2>(stat.second);// L0文件数计入层级
     } else {
       num_levels++;
     }
