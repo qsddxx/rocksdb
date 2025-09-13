@@ -137,13 +137,141 @@ Status OverlapWithIterator(const Comparator* ucmp,
 
   return iter->status();
 }
+class SegmentPicker {
+public:
+  SegmentPicker(const Slice& user_key, const Slice& ikey,
+                std::vector<std::vector<Segment*>>* segments,
+                const Comparator* user_comparator,
+                const InternalKeyComparator* internal_comparator)
+      : user_key_(user_key),
+        ikey_(ikey),
+        segments_(segments),
+        user_comparator_(user_comparator),
+        internal_comparator_(internal_comparator),
+        curr_level_(0),
+        search_ended_(false) {
+    
+    if (segments_ == nullptr || segments_->empty()) {
+      search_ended_ = true;
+      num_levels_ = 0;
+      return;
+    }
+    
+    num_levels_ = segments_->size();
+    // 为每层初始化搜索状态
+    level_states_.resize(num_levels_);
+    for (size_t level = 0; level < num_levels_; ++level) {
+      LevelState& state = level_states_[level];
+      state.curr_index = 0;
+      state.num_segments = (*segments_)[level].size();
+      state.search_done = (state.num_segments == 0);
+    }
+    
+    // 准备第一层搜索
+    PrepareLevel(curr_level_);
+  }
 
+  Segment* GetNextSegment() {
+    if (search_ended_) {
+      return nullptr;
+    }
+    
+    while (curr_level_ < num_levels_) {
+      LevelState& state = level_states_[curr_level_];
+      
+      // 在当前层级内搜索
+      while (state.curr_index < state.num_segments) {
+        Segment* seg = (*segments_)[curr_level_][state.curr_index];
+        state.curr_index++;
+        
+        // 提取用户键进行比较
+        Slice seg_smallest_user = ExtractUserKey(seg->smallest.Encode());
+        Slice seg_largest_user = ExtractUserKey(seg->largest.Encode());
+        
+        // 检查键是否在 Segment 范围内
+        if (user_comparator_->CompareWithoutTimestamp(user_key_, seg_smallest_user) >= 0 &&
+            user_comparator_->CompareWithoutTimestamp(user_key_, seg_largest_user) <= 0) {
+          return seg;  // 找到可能包含键的 Segment
+        }
+        
+        // 如果键小于当前 Segment 的最小键，可以跳过当前层级剩余 Segment
+        if (user_comparator_->CompareWithoutTimestamp(user_key_, seg_smallest_user) < 0) {
+          break;
+        }
+      }
+      
+      // 移动到下一层级
+      curr_level_++;
+      if (curr_level_ < num_levels_) {
+        PrepareLevel(curr_level_);
+      } else {
+        search_ended_ = true;
+        return nullptr;
+      }
+    }
+    
+    search_ended_ = true;
+    return nullptr;
+  }
+
+private:
+  // 层级状态结构
+  struct LevelState {
+    size_t curr_index;     // 当前搜索位置
+    size_t num_segments;   // 层级中的 Segment 数量
+    bool search_done;      // 是否完成该层级搜索
+  };
+  
+  // 为指定层级准备二分查找
+  void PrepareLevel(size_t level) {
+    LevelState& state = level_states_[level];
+    if (state.search_done || state.num_segments == 0) {
+      return;
+    }
+    
+    auto& level_segments = (*segments_)[level];
+    size_t left = 0;
+    size_t right = state.num_segments - 1;
+    
+    // 使用用户键进行二分查找
+    while (left < right) {
+      size_t mid = left + (right - left) / 2;
+      Segment* mid_seg = level_segments[mid];
+      
+      // 提取用户键进行比较
+      Slice mid_largest_user = ExtractUserKey(mid_seg->largest.Encode());
+      
+      // 比较用户键（不带时间戳）
+      if (user_comparator_->CompareWithoutTimestamp(user_key_, mid_largest_user) <= 0) {
+        right = mid;
+      } else {
+        left = mid + 1;
+      }
+    }
+    
+    // 设置当前索引为二分查找结果
+    state.curr_index = left;
+  }
+
+  const Slice user_key_;
+  const Slice ikey_;
+  std::vector<std::vector<Segment*>>* segments_; // 二维 Segment 数组
+  const Comparator* user_comparator_;
+  const InternalKeyComparator* internal_comparator_;
+  
+  size_t curr_level_;       // 当前搜索的层级
+  size_t num_levels_;       // 总层级数
+  bool search_ended_;       // 搜索是否结束
+  
+  std::vector<LevelState> level_states_; // 每个层级的状态
+};
 // Class to help choose the next file to search for the particular key.
 // Searches and returns files level by level.
 // We can search level-by-level since entries never hop across
 // levels. Therefore we are guaranteed that if we find data
 // in a smaller level, later levels are irrelevant (unless we
 // are MergeInProgress).
+
 class FilePicker {
  public:
   FilePicker(const Slice& user_key, const Slice& ikey,
@@ -351,7 +479,270 @@ class FilePicker {
   }
 };
 }  // anonymous namespace
+class SegmentPickerMultiGet {
+ private:
+  struct SegmentPickerContext;
 
+ public:
+  SegmentPickerMultiGet(MultiGetRange* range,
+                        std::vector<std::vector<Segment*>>* segments,
+                        const Comparator* user_comparator,
+                        const InternalKeyComparator* internal_comparator)
+      : segments_(segments),
+        num_levels_(segments_ ? segments_->size() : 0),
+        user_comparator_(user_comparator),
+        internal_comparator_(internal_comparator),
+        range_(*range),
+        current_level_range_(*range),
+        current_segment_range_(*range),
+        curr_level_(static_cast<unsigned int>(-1)),
+        returned_level_(static_cast<unsigned int>(-1)),
+        batch_iter_ (range_.begin()),
+        batch_iter_prev_ (range_.begin()),
+        upper_key_ (range_.begin()),
+        hit_segment_(nullptr),
+        maybe_repeat_key_(false),
+        search_ended_(false),
+        is_last_segment_in_level_(false) {
+        
+    // 初始化批量迭代器
+    
+    
+    // 初始化上下文数组
+    size_t range_size = 0;
+    for (auto iter = range_.begin(); iter != range_.end(); ++iter) {
+      range_size++;
+    }
+    sp_ctx_array_.resize(range_size);
+    
+    // 初始化每个键的上下文
+    size_t index = 0;
+    for (auto iter = range_.begin(); iter != range_.end(); ++iter) {
+      sp_ctx_array_[index] = SegmentPickerContext(0, num_levels_);
+      index++;
+    }
+    
+    // 准备第一层搜索
+    PrepareNextLevelForSearch();
+  }
+
+  Segment* GetNextSegment() {
+    if (batch_iter_ == range_.end() || search_ended_) {
+      hit_segment_ = nullptr;
+      return nullptr;
+    } else {
+      if (maybe_repeat_key_) {
+        maybe_repeat_key_ = false;
+        // 检查是否需要为上一个键重复搜索
+        batch_iter_ = upper_key_;
+      }
+      // 设置下一段范围的起始点
+      batch_iter_prev_ = batch_iter_;
+    }
+
+    // 检查当前层级是否有效
+    if (curr_level_ >= num_levels_) {
+      hit_segment_ = nullptr;
+      return nullptr;
+    }
+    
+    size_t curr_segment_index = 0;
+    if (batch_iter_ != range_.end()) {
+      // 找到当前键的索引
+      size_t key_index = 0;
+      for (auto iter = range_.begin(); iter != range_.end(); ++iter) {
+        if (iter == batch_iter_) {
+          curr_segment_index = sp_ctx_array_[key_index].curr_index_in_curr_level;
+          break;
+        }
+        key_index++;
+      }
+    } else {
+      curr_segment_index = (*segments_)[curr_level_].size();
+    }
+    
+    Segment* seg;
+    bool is_last_key_in_segment;
+    if (!GetNextSegmentInLevelWithKeys(&curr_segment_index, &seg, &is_last_key_in_segment)) {
+      hit_segment_ = nullptr;
+      return nullptr;
+    } else {
+      if (is_last_key_in_segment) {
+        // 更新键的索引
+        auto tmp_iter = batch_iter_;
+        size_t key_index = 0;
+        for (auto iter = range_.begin(); iter != range_.end(); ++iter) {
+          if (iter == tmp_iter) {
+            ++(sp_ctx_array_[key_index].curr_index_in_curr_level);
+            if (tmp_iter != upper_key_) {
+              ++tmp_iter;
+              key_index++;
+            } else {
+              break;
+            }
+          } else {
+            key_index++;
+          }
+        }
+        maybe_repeat_key_ = true;
+      }
+      // 设置当前段的范围
+      current_segment_range_ = MultiGetRange(range_, batch_iter_prev_, upper_key_);
+      returned_level_ = curr_level_;
+      is_last_segment_in_level_ =
+          curr_segment_index == (*segments_)[curr_level_].size() - 1;
+      hit_segment_ = seg;
+      return seg;
+    }
+  }
+
+  unsigned int GetCurrentLevel() const { return curr_level_; }
+  Segment* GetHitSegment() { return hit_segment_; }
+  bool IsLastSegmentInLevel() { return is_last_segment_in_level_; }
+  bool KeyMaySpanNextSegment() { return maybe_repeat_key_; }
+  bool IsSearchEnded() { return search_ended_; }
+  const MultiGetRange& CurrentSegmentRange() { return current_segment_range_; }
+  MultiGetRange& GetRange() { return range_; }
+
+  void PrepareNextLevelForSearch() { search_ended_ = !PrepareNextLevel(); }
+
+ private:
+  struct SegmentPickerContext {
+    size_t curr_index_in_curr_level;
+    unsigned int level;
+
+    SegmentPickerContext() : curr_index_in_curr_level(0), level(0) {}
+    SegmentPickerContext(size_t idx, unsigned int lvl)
+        : curr_index_in_curr_level(idx), level(lvl) {}
+  };
+
+  bool PrepareNextLevel() {
+    curr_level_++;
+    while (curr_level_ < num_levels_) {
+      // 检查当前层级是否有效
+      if (curr_level_ >= segments_->size() || (*segments_)[curr_level_].empty()) {
+        curr_level_++;
+        continue;
+      }
+      
+      // 准备当前层级
+      size_t key_index = 0;
+      for (auto iter = current_level_range_.begin(); 
+           iter != current_level_range_.end(); ++iter) {
+        auto& ctx = sp_ctx_array_[key_index];
+        ctx.level = curr_level_;
+        
+        // 使用二分查找定位起始位置
+        ctx.curr_index_in_curr_level = FindSegmentInLevel(
+            curr_level_, ExtractUserKey(iter->ikey));
+        key_index++;
+      }
+      
+      // 初始化批量迭代器
+      batch_iter_ = current_level_range_.begin();
+      batch_iter_prev_ = current_level_range_.begin();
+      upper_key_ = current_level_range_.end();
+      return true;
+    }
+    return false;  // 没有更多层级
+  }
+
+  size_t FindSegmentInLevel(unsigned int level, const Slice& user_key) {
+    // 检查层级是否有效
+    if (level >= segments_->size() || (*segments_)[level].empty()) {
+      return 0;
+    }
+    
+    auto& level_segments = (*segments_)[level];
+    size_t left = 0;
+    size_t right = level_segments.size() - 1;
+    
+    // 二分查找定位起始段
+    while (left <= right) {
+      size_t mid = left + (right - left) / 2;
+      Segment* mid_seg = level_segments[mid];
+      
+      // 修复: 使用段的最小键和最大键进行比较
+      Slice seg_smallest_user = ExtractUserKey(mid_seg->smallest.Encode());
+      Slice seg_largest_user = ExtractUserKey(mid_seg->largest.Encode());
+      
+      // 比较用户键（不带时间戳）
+      if (user_comparator_->CompareWithoutTimestamp(user_key, seg_smallest_user) < 0) {
+        // 用户键小于段的最小键，向左查找
+        right = mid - 1;
+      } else if (user_comparator_->CompareWithoutTimestamp(user_key, seg_largest_user) > 0) {
+        // 用户键大于段的最大键，向右查找
+        left = mid + 1;
+      } else {
+        // 用户键在段的范围内，返回当前段
+        return mid;
+      }
+    }
+    return left; // 返回最接近的段索引
+  }
+
+  bool GetNextSegmentInLevelWithKeys(size_t* start_index,
+                                    Segment** seg, bool* is_last_key_in_segment) {
+    // 检查当前层级是否有效
+    if (curr_level_ >= segments_->size() || (*segments_)[curr_level_].empty()) {
+      return false;
+    }
+    
+    auto& level_segments = (*segments_)[curr_level_];
+    size_t curr_index = *start_index;
+    
+    // 确保索引在有效范围内
+    if (curr_index >= level_segments.size()) {
+      return false;
+    }
+    
+    while (curr_index < level_segments.size()) {
+      Segment* segment = level_segments[curr_index];
+      Slice seg_smallest_user = ExtractUserKey(segment->smallest.Encode());
+      Slice seg_largest_user = ExtractUserKey(segment->largest.Encode());
+      
+      // 检查当前段是否包含范围内的键
+      auto iter = batch_iter_;
+      while (iter != range_.end()) {
+        Slice user_key = ExtractUserKey(iter->ikey);
+        if (user_comparator_->CompareWithoutTimestamp(user_key, seg_smallest_user) >= 0 &&
+            user_comparator_->CompareWithoutTimestamp(user_key, seg_largest_user) <= 0) {
+          // 找到匹配的键
+          *seg = segment;
+          *start_index = curr_index;
+          *is_last_key_in_segment = (curr_index == level_segments.size() - 1);
+          
+          // 设置 upper_key_ 为下一个键
+          upper_key_ = iter;
+          ++upper_key_;
+          return true;
+        }
+        ++iter;
+      }
+      curr_index++;
+    }
+    return false;
+  }
+
+  // 成员变量按照声明顺序排列
+  std::vector<std::vector<Segment*>>* segments_;
+  unsigned int num_levels_;
+  const Comparator* user_comparator_;
+  const InternalKeyComparator* internal_comparator_;
+  MultiGetRange range_;
+  MultiGetRange current_level_range_;
+  MultiGetRange current_segment_range_;
+  unsigned int curr_level_;
+  unsigned int returned_level_;
+  MultiGetRange::Iterator batch_iter_;
+  MultiGetRange::Iterator batch_iter_prev_;
+  MultiGetRange::Iterator upper_key_;
+  Segment* hit_segment_;
+  bool maybe_repeat_key_;
+  bool search_ended_;
+  bool is_last_segment_in_level_;
+  std::vector<SegmentPickerContext> sp_ctx_array_;
+};
 class FilePickerMultiGet {
  private:
   struct FilePickerContext;
@@ -843,7 +1234,17 @@ class FilePickerMultiGet {
   }
 };
 
-VersionStorageInfo::~VersionStorageInfo() { delete[] files_; }
+VersionStorageInfo::~VersionStorageInfo()
+{ 
+  delete[] files_;
+  for(int i=0;i<int(segments_.size());i++)
+  {
+    for(auto&j: segments_[i])
+    {
+      delete j;
+    }
+  }
+}
 
 Version::~Version() {
   assert(refs_ == 0);
@@ -880,35 +1281,7 @@ int FindFile(const InternalKeyComparator& icmp,
                          static_cast<uint32_t>(file_level.num_files));
 }
 
-void DoGenerateLevelFilesBrief(LevelFilesBrief* file_level,
-                               const std::vector<FileMetaData*>& files,
-                               Arena* arena) {
-  assert(file_level);
-  assert(arena);
 
-  size_t num = files.size();
-  file_level->num_files = num;
-  char* mem = arena->AllocateAligned(num * sizeof(FdWithKeyRange));
-  file_level->files = new (mem) FdWithKeyRange[num];
-
-  for (size_t i = 0; i < num; i++) {
-    Slice smallest_key = files[i]->smallest.Encode();
-    Slice largest_key = files[i]->largest.Encode();
-
-    // Copy key slice to sequential memory
-    size_t smallest_size = smallest_key.size();
-    size_t largest_size = largest_key.size();
-    mem = arena->AllocateAligned(smallest_size + largest_size);
-    memcpy(mem, smallest_key.data(), smallest_size);
-    memcpy(mem + smallest_size, largest_key.data(), largest_size);
-
-    FdWithKeyRange& f = file_level->files[i];
-    f.fd = files[i]->fd;
-    f.file_metadata = files[i];
-    f.smallest_key = Slice(mem, smallest_size);
-    f.largest_key = Slice(mem + smallest_size, largest_size);
-  }
-}
 
 static bool AfterFile(const Comparator* ucmp, const Slice* user_key,
                       const FdWithKeyRange* f) {
@@ -2242,15 +2615,19 @@ VersionStorageInfo::VersionStorageInfo(
     bool _force_consistency_checks,
     EpochNumberRequirement epoch_number_requirement, SystemClock* clock,
     uint32_t bottommost_file_compaction_delay,
-    OffpeakTimeOption offpeak_time_option)
+    OffpeakTimeOption offpeak_time_option,int level_per_segment_level1)
     : internal_comparator_(internal_comparator),
       user_comparator_(user_comparator),
       // cfd is nullptr if Version is dummy
       num_levels_(levels),
+      num_segments_level_(levels),
       num_non_empty_levels_(0),
       file_indexer_(user_comparator),
       compaction_style_(compaction_style),
       files_(new std::vector<FileMetaData*>[num_levels_]),
+      max_segment_num_(0),
+      segments_(levels),
+      level_per_segment_level(level_per_segment_level1),
       base_level_(num_levels_ == 1 ? -1 : 1),
       lowest_unnecessary_level_(-1),
       level_multiplier_(0.0),
@@ -2321,7 +2698,8 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
           cfd_ == nullptr ? nullptr : cfd_->ioptions().clock,
           cfd_ == nullptr ? 0
                           : mutable_cf_options.bottommost_file_compaction_delay,
-          vset->offpeak_time_option()),
+          vset->offpeak_time_option(),cfd_ == nullptr ? 10
+                          : cfd_->current()->GetStorageInfo()->GetLevelPerSegmentLevel()),
       vset_(vset),
       next_(this),
       prev_(this),
@@ -2513,14 +2891,18 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
   if (merge_operator_) {
     pinned_iters_mgr->StartPinning();
   }
-
-  FilePicker fp(user_key, ikey, &storage_info_.level_files_brief_,
-                storage_info_.num_non_empty_levels_,
-                &storage_info_.file_indexer_, user_comparator(),
+  SegmentPicker sp(user_key,ikey,storage_info_.GetSegments(),user_comparator(),internal_comparator());
+  Segment* s = sp.GetNextSegment();
+  while(s!=nullptr)
+  {
+    FilePicker fp(user_key, ikey, &s->level_files_brief_,
+                s->GetLevelNum(),
+                &s->file_indexer_, user_comparator(),
                 internal_comparator());
-  FdWithKeyRange* f = fp.GetNextFile();
+    FdWithKeyRange* f = fp.GetNextFile();
 
-  while (f != nullptr) {
+  while (f != nullptr) 
+  {
     if (*max_covering_tombstone_seq > 0) {
       // The remaining files we look at will only contain covered keys, so we
       // stop here.
@@ -2629,6 +3011,8 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
     }
     f = fp.GetNextFile();
   }
+  s = sp.GetNextSegment();
+  }
   if (db_statistics_ != nullptr) {
     get_context.ReportCounters();
   }
@@ -2719,16 +3103,21 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
 #endif  // USE_COROUTINES
   {
     MultiGetRange file_picker_range(*range, range->begin(), range->end());
-    FilePickerMultiGet fp(&file_picker_range, &storage_info_.level_files_brief_,
-                          storage_info_.num_non_empty_levels_,
-                          &storage_info_.file_indexer_, user_comparator(),
-                          internal_comparator());
-    FdWithKeyRange* f = fp.GetNextFileInLevel();
+    SegmentPickerMultiGet sp(&file_picker_range,storage_info_.GetSegments(),user_comparator(),internal_comparator());
+    Segment* spp = sp.GetNextSegment();
     uint64_t num_index_read = 0;
     uint64_t num_filter_read = 0;
     uint64_t num_sst_read = 0;
     uint64_t num_level_read = 0;
-
+    FdWithKeyRange* f;
+    while(spp!=nullptr)
+    {
+    FilePickerMultiGet fp(&file_picker_range, &spp->level_files_brief_,
+                          spp->GetLevelNum(),
+                          &storage_info_.file_indexer_, user_comparator(),
+                          internal_comparator()); 
+    f = fp.GetNextFileInLevel();
+    
     int prev_level = -1;
 
     while (!fp.IsSearchEnded()) {
@@ -2852,7 +3241,7 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
         prev_level = fp.GetHitFileLevel();
       }
     }
-
+  }
     // Dump stats for most recent level
     if (num_filter_read + num_index_read) {
       RecordInHistogram(db_statistics_,
@@ -3183,6 +3572,8 @@ void VersionStorageInfo::PrepareForVersionAppend(
   GenerateLevel0NonOverlapping();
   GenerateBottommostFiles();
   GenerateFileLocationIndex();
+  GenerateFileIndexInSegment();
+  GenerateSegmentIndex();
 }
 
 void Version::PrepareAppend(const ReadOptions& read_options,
@@ -5243,6 +5634,7 @@ VersionSet::VersionSet(
       db_id_(db_id),
       db_options_(_db_options),
       next_file_number_(2),
+      next_segment_number_(2),
       manifest_file_number_(0),  // Filled by Recover()
       options_file_number_(0),
       options_file_size_(0),
@@ -5344,6 +5736,7 @@ void VersionSet::Reset() {
   }
   db_id_.clear();
   next_file_number_.store(2);
+  next_segment_number_.store(2);
   min_log_number_to_keep_.store(0);
   manifest_file_number_ = 0;
   options_file_number_ = 0;
@@ -6560,7 +6953,8 @@ Status VersionSet::ReduceNumberOfLevels(const std::string& dbname,
   }
 
   delete[] vstorage->files_;
-  vstorage->files_ = new_files_list;
+    vstorage->files_=new_files_list;
+  
   vstorage->num_levels_ = new_levels;
   vstorage->ResizeCompactCursors(new_levels);
 

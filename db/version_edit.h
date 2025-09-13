@@ -26,9 +26,21 @@
 #include "table/table_reader.h"
 #include "table/unique_id_impl.h"
 #include "util/autovector.h"
-
+#include "db/file_indexer.h"
+//#include "db/version_set.h"
+//#include "db/version_set.cc"
 namespace ROCKSDB_NAMESPACE {
-
+struct LevelFilesBrief {
+  size_t num_files;
+  FdWithKeyRange* files;
+  LevelFilesBrief() {
+    num_files = 0;
+    files = nullptr;
+  }
+};
+void DoGenerateLevelFilesBrief(LevelFilesBrief* file_level,
+                               const std::vector<FileMetaData*>& files,
+                               Arena* arena);
 // Tag numbers for serialized VersionEdit.  These numbers are written to
 // disk and should not be changed. The number should be forward compatible so
 // users can down-grade RocksDB safely. A future Tag is ignored by doing '&'
@@ -408,7 +420,149 @@ struct FileMetaData {
     return tail_size;
   }
 };
+class key_for_change
+  {
+    public:
+    InternalKey smallest;
+    InternalKey largest;
+    bool is_changed;
+    bool is_empty;
+    public:
+    key_for_change()
+    {
+      is_changed=false;
+      is_empty=false;
+    }
+  };
 
+class Segment
+{
+  public:
+   bool operator==(const Segment& other) const
+   {
+       return segment_num_==other.GetSegmentNum();
+   }
+   bool operator<(const Segment& other)
+   {
+       return segment_num_<other.GetSegmentNum();
+   }
+   bool operator>(const Segment& other) 
+   {
+      return segment_num_>other.GetSegmentNum();
+   }
+    bool operator!=(const Segment& other) const
+    {
+        return !(*this == other);
+    }
+  Segment& operator=(const Segment& other) {
+        if (this != &other) {
+            smallest = other.smallest;
+            largest = other.largest;
+            level_files_brief_ = other.level_files_brief_;
+            file_indexer_ = other.file_indexer_;
+            key_range = other.key_range;
+            deleted_file_location = other.deleted_file_location;
+            deleted_key_range = other.deleted_key_range;
+            level = other.level;
+            file_number = other.file_number;
+            files_.resize(other.files_.size());
+            for (size_t i = 0; i < other.files_.size(); i++) {
+                files_[i].resize(other.files_[i].size());
+                for (size_t j = 0; j < other.files_[i].size(); j++) {
+                    files_[i][j] = other.files_[i][j];
+                }
+            }
+            file_location.clear();
+            for (size_t i = 0; i < files_.size(); i++) {
+                for (size_t j = 0; j < files_[i].size(); j++) {
+                    file_location[files_[i][j]->fd.GetNumber()] = {
+                        static_cast<int>(i), static_cast<int>(j)
+                    };
+                }
+            }
+        }
+        return *this;
+    }
+  const std::vector<std::vector<FileMetaData*>> get_files()const
+  {
+    return files_;
+  }
+
+  int AddFile(const FileMetaData* added_file,const InternalKeyComparator* cmp);
+  void MakeActualDelete(const InternalKeyComparator* cmp);
+  std::vector<std::pair<FileMetaData*,int>> MakeActualDeleteWithMiddleReturn(const InternalKeyComparator* cmp);
+  std::vector<std::tuple<FileMetaData*,int,int>> MakeActualDeleteAndReturn(const InternalKeyComparator* cmp);
+  int HasOverlapWithLevel(int lvl, const FileMetaData* file, const InternalKeyComparator* cmp);
+  std::vector<std::pair<FileMetaData*,int>> AddFiles(const std::vector<std::vector<FileMetaData*>> add_files_list,const InternalKeyComparator* cmp);
+
+  bool Overlaps(FileMetaData* a, const FileMetaData* b, const InternalKeyComparator* cmp)
+  {
+    return cmp->Compare(a->smallest, b->largest) <= 0 &&
+           cmp->Compare(a->largest, b->smallest) >= 0;
+  }
+  void InsertFileInLevel(int lvl, const FileMetaData* file, std::vector<FileMetaData*>::iterator it,const InternalKeyComparator* cmp);
+  void RecordFileDeletion (std::unordered_set<uint64_t> deleted_files_for_judge)const;
+  void AppendFileListAtLast(const std::vector<std::vector<FileMetaData*>> added_files,InternalKey largest_);
+  void GetNotDeletedFiles(std::vector<FileMetaData*>& not_deleted_files)const;
+  void UpdateSegmentNum(uint64_t num){segment_num_=num;}
+  bool NeedClearEmptyLevel(int num,int num2);
+  uint64_t GetSegmentNum()const
+  {
+    return segment_num_;
+  }
+  bool IsEmpty()
+  {
+    return file_number<=0;
+  }
+  void RebuildFileLocation();
+  void GenerateFileIndexer()
+  {
+    file_indexer_.UpdateIndex(&arena_, level, &files_[0]);
+  }
+  void GenerateLevelFilesBrief()
+  {
+  level_files_brief_.resize(level);
+  for (int i = 0; i<level; i++)
+  {
+    DoGenerateLevelFilesBrief(&(level_files_brief_[i]), files_[i],&arena_);
+  }
+}
+int GetLevel()
+{
+  return level;
+}
+  /*void UpdateSegmentIsChanged()const
+  {
+    segment_is_changed=true;
+  }*/
+  Segment()=delete;
+  Segment(const Segment& other);
+  Segment(const Segment& other,const Comparator* cmp);
+  explicit Segment(FileMetaData* file,const Comparator* ucmp);
+  int GetLevelNum()
+  {
+    return level;
+  }
+  InternalKey smallest;
+  InternalKey largest;
+  autovector<LevelFilesBrief> level_files_brief_;
+  FileIndexer file_indexer_;
+  private:
+  std::vector<std::vector<FileMetaData*>> files_;
+  std::vector<std::pair<InternalKey,InternalKey>> key_range;
+  std::unordered_map<uint64_t,std::pair<int,int>> file_location;
+  mutable std::vector<std::pair<int,int>> deleted_file_location;
+  mutable std::vector<key_for_change> deleted_key_range;
+  Arena arena_;
+  int level;
+  uint64_t segment_num_;
+  int file_number;
+  mutable int deleted_file_num;
+  //mutable bool segment_is_changed;
+  mutable bool has_empty_level;
+  //mutable std::vector<std::tuple<FileMetaData*,int,int>> children_segment_file_list;
+  //mutable std::vector<std::tuple<FileMetaData*,int,int>> single_added_file_list;
+};
 // A compressed copy of file meta data that just contain minimum data needed
 // to serve read operations, while still keeping the pointer to full metadata
 // of the file in case it is needed.
@@ -431,14 +585,7 @@ struct FdWithKeyRange {
 
 // Data structure to store an array of FdWithKeyRange in one level
 // Actual data is guaranteed to be stored closely
-struct LevelFilesBrief {
-  size_t num_files;
-  FdWithKeyRange* files;
-  LevelFilesBrief() {
-    num_files = 0;
-    files = nullptr;
-  }
-};
+
 
 // The state of a DB at any given time is referred to as a Version.
 // Any modification to the Version is considered a Version Edit. A Version is
@@ -518,16 +665,52 @@ class VersionEdit {
   // Delete the specified table file from the specified level.
   void DeleteFile(int level, uint64_t file) {
     deleted_files_.emplace(level, file);
+    map_for_judge.emplace(file);
+    deleted_files_for_judge.emplace(level,file);
+  }
+  void DeleteSegment(int level,Segment& s)
+  {
+    deleted_segments_.emplace_back(level,s);
+     for(auto files:s.get_files())
+    {
+      for(auto f:files)
+      {
+        if(map_for_judge.find(f->fd.GetNumber())==map_for_judge.end())
+        {
+          deleted_files_.emplace(level, f->fd.GetNumber());
+        }
+      }
+    }
   }
 
   // Retrieve the table files deleted as well as their associated levels.
   using DeletedFiles = std::set<std::pair<int, uint64_t>>;
+  using DeletedSegments=std::vector<std::pair<int,Segment>>;
   const DeletedFiles& GetDeletedFiles() const { return deleted_files_; }
-
+  const DeletedFiles& GetDeletedFilesForJudge() const { return deleted_files_for_judge; }
+  const DeletedSegments& GetDeletedSegments() const  {return deleted_segments_;}
   // Add the specified table file at the specified level.
   // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
   // REQUIRES: "oldest_blob_file_number" is the number of the oldest blob file
   // referred to by this file if any, kInvalidBlobFileNumber otherwise.
+  void ChangeSegment(int first,int second,Segment& s)
+  {
+    changed_segments_.emplace_back(first,second,s);
+    for(auto files:s.get_files())
+    {
+      for(auto f:files)
+      {
+        if(map_for_judge.find(f->fd.GetNumber())==map_for_judge.end())
+        {
+          deleted_files_.emplace(first, f->fd.GetNumber());
+          new_files_.emplace_back(second,*f);
+          files_to_quarantine_.emplace_back(f->fd.GetNumber());
+        }
+      }
+    }
+  }
+  using ChangedSegments = std::vector<std::tuple<int,int,Segment>>;
+  const ChangedSegments& GetChangedSegments() const {return changed_segments_;}
   void AddFile(int level, uint64_t file, uint32_t file_path_id,
                uint64_t file_size, const InternalKey& smallest,
                const InternalKey& largest, const SequenceNumber& smallest_seqno,
@@ -550,6 +733,15 @@ class VersionEdit {
                      compensated_range_deletion_size, tail_size,
                      user_defined_timestamps_persisted));
     files_to_quarantine_.push_back(file);
+    new_files_for_judge.emplace_back(
+        level,
+        FileMetaData(file, file_path_id, file_size, smallest, largest,
+                     smallest_seqno, largest_seqno, marked_for_compaction,
+                     temperature, oldest_blob_file_number, oldest_ancester_time,
+                     file_creation_time, epoch_number, file_checksum,
+                     file_checksum_func_name, unique_id,
+                     compensated_range_deletion_size, tail_size,
+                     user_defined_timestamps_persisted));
     if (!HasLastSequence() || largest_seqno > GetLastSequence()) {
       SetLastSequence(largest_seqno);
     }
@@ -558,17 +750,33 @@ class VersionEdit {
   void AddFile(int level, const FileMetaData& f) {
     assert(f.fd.smallest_seqno <= f.fd.largest_seqno);
     new_files_.emplace_back(level, f);
+    new_files_for_judge.emplace_back(level,f);
     files_to_quarantine_.push_back(f.fd.GetNumber());
     if (!HasLastSequence() || f.fd.largest_seqno > GetLastSequence()) {
       SetLastSequence(f.fd.largest_seqno);
     }
   }
+  void AddSegment(int level,Segment& s)
+  {
+    new_segments_.emplace_back(level,s);
+    for(auto files:s.get_files())
+    {
+      for(auto f:files)
+      {
+        new_files_.emplace_back(level, *f);
+        files_to_quarantine_.push_back(f->fd.GetNumber());
+      }
+    }
+  }
 
   // Retrieve the table files added as well as their associated levels.
   using NewFiles = std::vector<std::pair<int, FileMetaData>>;
+  using NewSegments=std::vector<std::pair<int,Segment>>;
   const NewFiles& GetNewFiles() const { return new_files_; }
 
   NewFiles& GetMutableNewFiles() { return new_files_; }
+  const NewFiles& GetNewFilesForJudge() const { return new_files_for_judge; }
+  const NewSegments& GetNewSegments() const {return new_segments_;}
 
   // Retrieve all the compact cursors
   using CompactCursors = std::vector<std::pair<int, InternalKey>>;
@@ -791,7 +999,13 @@ class VersionEdit {
   CompactCursors compact_cursors_;
 
   DeletedFiles deleted_files_;
+  DeletedFiles deleted_files_for_judge;
   NewFiles new_files_;
+  NewFiles new_files_for_judge;
+  DeletedSegments deleted_segments_;
+  ChangedSegments changed_segments_;
+  std::unordered_set<int> map_for_judge;
+  NewSegments new_segments_;
 
   BlobFileAdditions blob_file_additions_;
   BlobFileGarbages blob_file_garbages_;

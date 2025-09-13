@@ -30,6 +30,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <iostream>
 
 #include "cache/cache_helpers.h"
 #include "db/blob/blob_file_meta.h"
@@ -116,9 +117,7 @@ bool SomeFileOverlapsRange(const InternalKeyComparator& icmp,
 // Generate LevelFilesBrief from vector<FdWithKeyRange*>
 // Would copy smallest_key and largest_key data to sequential memory
 // arena: Arena used to allocate the memory
-void DoGenerateLevelFilesBrief(LevelFilesBrief* file_level,
-                               const std::vector<FileMetaData*>& files,
-                               Arena* arena);
+
 enum EpochNumberRequirement {
   kMightMissing,
   kMustPresent,
@@ -137,14 +136,36 @@ class VersionStorageInfo {
                      EpochNumberRequirement epoch_number_requirement,
                      SystemClock* clock,
                      uint32_t bottommost_file_compaction_delay,
-                     OffpeakTimeOption offpeak_time_option);
+                     OffpeakTimeOption offpeak_time_option,int level_for_segment);
   // No copying allowed
   VersionStorageInfo(const VersionStorageInfo&) = delete;
   void operator=(const VersionStorageInfo&) = delete;
   ~VersionStorageInfo();
-
+  std::vector<std::vector<Segment*>>* GetSegments(){return &segments_;}
   void Reserve(int level, size_t size) { files_[level].reserve(size); }
-
+  void ReserveForSegments(int level, size_t size)
+  { 
+    if (level >= int(segments_.size()))
+    {
+      segments_.resize(level + 1);
+      num_segments_level_=level+1;
+    }
+    segments_[level].reserve(size); 
+  }
+  
+  void CopySegment(std::vector<std::vector<Segment*>>& new_segment)
+  {
+    segments_.clear();
+    segments_.resize(new_segment.size());
+    for(int i=0;i<int(new_segment.size());i++)
+    {
+      for(auto& f:new_segment[i])
+      {
+        segments_[i].emplace_back(f);
+      }
+    }
+    num_segments_level_=int(segments_.size());
+  }
   void AddFile(int level, FileMetaData* f);
 
   // Resize/Initialize the space for compact_cursor_
@@ -182,7 +203,200 @@ class VersionStorageInfo {
   void ReserveBlob(size_t size) { blob_files_.reserve(size); }
 
   void AddBlobFile(std::shared_ptr<BlobFileMetaData> blob_file_meta);
-
+  void AddSegments(int level,Segment* segments,const InternalKeyComparator* cmp)
+  {
+    
+    for(int i=int(segments_.size());i<(level+1);i++)
+    {
+      segments_.emplace_back(std::vector<Segment*>());
+      num_segments_level_++;
+    }
+    segments->MakeActualDelete(cmp);
+    if(!segments->IsEmpty())
+    {
+        segments_[level].emplace_back(segments);
+    }
+  }
+  void AddSegmentsAndMerge(int level,Segment* new_segment,const InternalKeyComparator* cmp)
+  {
+    if (level >= int(segments_.size()))
+    {
+      segments_.resize(level + 1);
+      num_segments_level_=(level+1);
+    }
+    //new_segment->MakeActualDelete(cmp);
+    if(new_segment->IsEmpty())
+    {
+        return;
+    }
+    auto& level_segments = (segments_)[level];
+    std::vector<Segment*> overlapping_segments;
+    int position=-1;
+    int total=0;
+    int middle=-1;
+    for (auto& exiting_segments:level_segments)
+    {
+        middle++;
+        bool overlaps = cmp->Compare(new_segment->smallest, exiting_segments->largest) <= 0 &&
+            cmp->Compare(new_segment->largest, exiting_segments->smallest) >= 0;
+        if (overlaps)
+        {
+          if(position==-1)
+          {
+            position=middle;
+          }
+          total++;
+          overlapping_segments.emplace_back(exiting_segments);
+        }
+        if(position!=-1)
+        {
+          break;
+        }
+    }
+    if (overlapping_segments.empty())
+    {
+        if(cmp->Compare(new_segment->smallest,level_segments.back()->largest)>0)
+        {
+          level_segments.push_back(new_segment);
+          return;
+        }
+        else{
+          level_segments.insert(level_segments.begin(),new_segment);
+          return;
+        }
+    }
+    for(int i=1;i<int(overlapping_segments.size());i++)
+    {
+      const std::vector<std::vector<FileMetaData*>> added_files= overlapping_segments[i]->get_files();
+      overlapping_segments[0]->AppendFileListAtLast(added_files,overlapping_segments[i]->largest);
+    }
+    overlapping_segments[0]->AddFiles(new_segment->get_files(),cmp);
+    for(int i=1;i<int(overlapping_segments.size());i++)
+    {
+      delete overlapping_segments[i];
+    }
+    for(int i=1;i<total;i++)
+    {
+      segments_[level].erase(segments_[level].begin()+position+i);
+    }
+  }
+  void RebuildSegmentsMap()
+  {
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      for (size_t pos = 0; pos < segments_[level].size(); ++pos)
+      {
+        segments_[level][pos]->RebuildFileLocation();
+      }
+    }
+  }
+  void GenerateFileIndexInSegment()
+  {
+    /*int num_segments;
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      num_segments += files_[level].size();
+    }
+    file_locations_.reserve(num_segments);*/
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      for (size_t pos = 0; pos < segments_[level].size(); ++pos)
+      {
+        const Segment* const meta = segments_[level][pos];
+        assert(meta);
+        const std::vector<std::vector<FileMetaData*>> file_list=meta->get_files();
+        for(int i=0;i<int(file_list.size());i++)
+        {
+          for(int j=0;j<int(file_list[i].size());j++)
+          {
+            const uint64_t file_number = file_list[i][j]->fd.GetNumber();
+            assert(file_locations_.find(file_number) == file_locations_.end());
+            file_location_in_segment.emplace(file_number, FileLocation(level, pos));
+          }
+        }
+        
+      }
+    }
+  }
+  void GenerateSegmentIndex()
+  {
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      for (size_t pos = 0; pos < segments_[level].size(); ++pos)
+      {
+        segment_locations_.emplace(segments_[level][pos]->GetSegmentNum(),FileLocation(level,pos));
+      }
+    }
+  }
+  void AddFileForSegments(int level,std::vector<FileMetaData*> added_files,const InternalKeyComparator* cmp)
+  {
+    if(level>=int(segments_.size()))
+    {
+      segments_.resize(level+1);
+      
+    }
+    for(auto& new_file:added_files)
+    {
+      auto& level_segments = segments_[level];
+      std::vector<Segment*> overlapping_segments;
+      int position=-1;
+      int total=0;
+      int middle=-1;
+      if(level_segments.empty())
+      {
+          const Comparator* ucmp = user_comparator();
+          segments_[level].emplace_back(new Segment(new_file,ucmp));
+          continue;
+      }
+      for (auto& exiting_segments:level_segments)
+      {
+          middle++;
+          bool overlaps = cmp->Compare(new_file->smallest, exiting_segments->largest) <= 0 &&
+            cmp->Compare(new_file->largest, exiting_segments->smallest) >= 0;
+          if (overlaps)
+          {
+            if(position==-1)
+            {
+              position=middle;
+            }
+            total++;
+            overlapping_segments.emplace_back(exiting_segments);
+          }
+          if(position!=-1)
+          {
+            break;
+          }
+      }
+      if (overlapping_segments.empty())
+      {
+        if(cmp->Compare(new_file->smallest,level_segments.back()->largest)>0)
+        {
+          const Comparator* ucmp = user_comparator();
+          level_segments.emplace_back(new Segment(new_file,ucmp));
+          return;
+        }
+        else{
+          const Comparator* ucmp = user_comparator();
+          level_segments.emplace(level_segments.begin(),new Segment(new_file,ucmp));
+          return;
+        }
+      }
+      for(int i=1;i<int(overlapping_segments.size());i++)
+      {
+        const std::vector<std::vector<FileMetaData*>> should_added_files= overlapping_segments[i]->get_files();
+        overlapping_segments[0]->AppendFileListAtLast(should_added_files,overlapping_segments[i]->largest);
+      }
+      overlapping_segments[0]->AddFile(new_file,cmp);
+      for(int i=1;i<int(overlapping_segments.size());i++)
+      {
+        delete overlapping_segments[i];
+      }
+      for(int i=1;i<total;i++)
+      {
+        segments_[level].erase(segments_[level].begin()+position+i);
+      }
+    }
+  }
   void PrepareForVersionAppend(const ImmutableOptions& immutable_options,
                                const MutableCFOptions& mutable_cf_options);
 
@@ -331,7 +545,9 @@ class VersionStorageInfo {
   const std::vector<FileMetaData*>& LevelFiles(int level) const {
     return files_[level];
   }
-
+  const std::vector<Segment*>& LevelSegments(int level) const {
+    return segments_[level];
+  }
   bool HasMissingEpochNumber() const;
   uint64_t GetMaxEpochNumberOfFiles() const;
   EpochNumberRequirement GetEpochNumberRequirement() const {
@@ -388,6 +604,23 @@ class VersionStorageInfo {
     assert(files_[it->second.GetLevel()][it->second.GetPosition()]);
     assert(files_[it->second.GetLevel()][it->second.GetPosition()]
                ->fd.GetNumber() == file_number);
+
+    return it->second;
+  }
+   
+  FileLocation GetSegmentLocation(uint64_t segment_number)
+  {
+    const auto it = segment_locations_.find(segment_number);
+
+    if (it == file_locations_.end()) {
+      return FileLocation::Invalid();
+    }
+
+    /*assert(it->second.GetLevel() < num_levels_);
+    assert(it->second.GetPosition() < files_[it->second.GetLevel()].size());
+    assert(files_[it->second.GetLevel()][it->second.GetPosition()]);
+    assert(files_[it->second.GetLevel()][it->second.GetPosition()]
+               ->fd.GetNumber() == file_number);*/
 
     return it->second;
   }
@@ -634,7 +867,132 @@ class VersionStorageInfo {
       int level, CompactionStyleSet compaction_style_set) const;
 
   const Comparator* user_comparator() const { return user_comparator_; }
-
+  std::atomic<int> GetMaxSegmentNum(){return max_segment_num_.load();}
+  void UpdateSegmentNum() {max_segment_num_.fetch_add(1);}
+  int GetInsertLevelForSegment(int level)
+  {
+    /*int i=0;
+    int j=0;
+    for(;i<int(level_per_segment_level.size());i++)
+    {
+      j+=level_per_segment_level[i];
+      if(j>=level)
+      {
+        break;
+      }
+    }
+    if(i==int(level_per_segment_level.size())&&j<level)
+    {
+      return (i);
+    }
+    return i;*/
+    return 1;
+  }
+  void AddFilesAfterSegment()
+  {
+    std::vector<FileMetaData*>*new_files_(new std::vector<FileMetaData*>[(num_segments_level_)*level_per_segment_level]);
+    for(int i=0;i<num_segments_level_;i++)
+    {
+      for(auto& s:segments_[i])
+      {
+        auto filelist=s->get_files();
+        if(int(filelist.size())>level_per_segment_level)
+        {
+          std::cerr<<"The level "<<i<<" has segment which has levels more than "<<level_per_segment_level<<std::endl;
+          exit(0);
+        }
+        for(int j=0;j<int(filelist.size());j++)
+        {
+          for(auto& f:filelist[j])
+          {
+            files_[(i+1)*level_per_segment_level-1-j].emplace_back(f);
+          }
+        }
+      }
+    }
+    delete[] files_;
+    files_=new_files_;
+    num_levels_=num_segments_level_*level_per_segment_level;
+    num_non_empty_levels_=num_levels_;
+    files_by_compaction_pri_.resize(num_levels_);
+    next_file_to_compact_by_size_.resize(num_levels_);
+    compaction_score_.resize(num_levels_);
+    compaction_level_.resize(num_levels_);
+    compact_cursor_.resize(num_levels_);
+    /*std::vector<int> num_levels;
+    auto filelist = new std::vector<std::vector<FileMetaData*>>();
+    for(int i=0;i<int(segments_.size());i++)
+    {
+      int max_level=0;
+      num_levels.emplace_back(0);
+      for(int j=0;j<int(segments_[i].size());j++)
+      {
+        if(segments_[i][j]->GetLevel()>max_level)
+        {
+          num_levels[i]=segments_[i][j]->GetLevel();
+        }
+      }
+    }
+    int position=0;
+    int max_position=0;
+    int judge_position=0;
+    for(auto i:num_levels)
+    {
+      max_position+=i;
+      judge_position=i-1;
+      while(position<max_position)
+      {
+        for(auto& j:segments_[i])
+        {
+          if(j->GetLevel()>=judge_position)
+          {
+            std::vector<std::vector<FileMetaData*>> file_list_for_judge=(j)->get_files();
+            for(auto& k:file_list_for_judge[judge_position])
+            {
+              (*filelist)[position].emplace_back(k);
+            }
+          }
+        }
+        position++;
+        judge_position--;
+      }
+    }
+    delete[] files_;
+    files_=new std::vector<FileMetaData*>[filelist->size()];
+    //level_per_segment_level.clear();
+    for(auto& i:num_levels)
+    {
+      //level_per_segment_level.emplace_back(i);
+    }
+    for(int i=0;i<int(filelist->size());i++)
+    {
+      for(int j=0;j<int(filelist[i].size());j++)
+      {
+        files_[i].emplace_back((*filelist)[i][j]);
+      }
+    }
+    num_levels_=int(filelist->size());
+    num_non_empty_levels_=num_levels_;
+    delete[] filelist;
+    files_by_compaction_pri_.resize(num_levels_);
+    next_file_to_compact_by_size_.resize(num_levels_);
+    compaction_score_.resize(num_levels_);
+    compaction_level_.resize(num_levels_);
+    compact_cursor_.resize(num_levels_);*/
+  }
+  int GetLevelPerSegmentLevel()
+  {
+    return level_per_segment_level;
+  }
+  using SegmentLocations=UnorderedMap<uint64_t,FileLocation>;
+  SegmentLocations& GetSegmentMap()
+  {
+    return segment_locations_;
+  }
+  void UpdateSegmentsLevel()
+  {
+    num_segments_level_=int(segments_.size());
+  }
  private:
   void ComputeCompensatedSizes();
   void UpdateNumNonEmptyLevels();
@@ -655,6 +1013,7 @@ class VersionStorageInfo {
   const InternalKeyComparator* internal_comparator_;
   const Comparator* user_comparator_;
   int num_levels_;            // Number of levels
+  int num_segments_level_;
   int num_non_empty_levels_;  // Number of levels. Any level larger than it
                               // is guaranteed to be empty.
   // Per-level max bytes
@@ -670,11 +1029,17 @@ class VersionStorageInfo {
   // List of files per level, files in each level are arranged
   // in increasing order of keys
   std::vector<FileMetaData*>* files_;
-
+  std::atomic<int> max_segment_num_;
+  std::vector<std::vector<Segment*>> segments_;
+  int level_per_segment_level;
   // Map of all table files in version. Maps file number to (level, position on
   // level).
   using FileLocations = UnorderedMap<uint64_t, FileLocation>;
   FileLocations file_locations_;
+  using FileLocationInSegment = UnorderedMap<uint64_t,FileLocation>;
+  FileLocationInSegment file_location_in_segment;
+  //using SegmentLocations=UnorderedMap<uint64_t,FileLocation>;
+  SegmentLocations segment_locations_;
 
   // Vector of blob files in version sorted by blob file number.
   BlobFiles blob_files_;
@@ -872,6 +1237,7 @@ using MultiGetRange = MultiGetContext::Range;
 // the column family at a certain point in time.
 class Version {
  public:
+ VersionStorageInfo* GetStorageInfo(){return &storage_info_;}
   // Append to *iters a sequence of iterators that will
   // yield the contents of this Version when merged together.
   // @param read_options Must outlive any iterator built by
@@ -1198,6 +1564,10 @@ class VersionSet {
   void operator=(const VersionSet&) = delete;
 
   virtual ~VersionSet();
+  std::atomic<uint64_t>& GetSegmentNumber()
+  {
+    return next_segment_number_;
+  }
 
   virtual Status Close(FSDirectory* db_dir, InstrumentedMutex* mu);
 
@@ -1348,6 +1718,8 @@ class VersionSet {
   }
 
   uint64_t current_next_file_number() const { return next_file_number_.load(); }
+  uint64_t current_next_segment_number() const { return next_segment_number_.load(); }
+
 
   uint64_t min_log_number_to_keep() const {
     return min_log_number_to_keep_.load();
@@ -1357,10 +1729,14 @@ class VersionSet {
 
   // Allocate and return a new file number
   uint64_t NewFileNumber() { return next_file_number_.fetch_add(1); }
+  uint64_t NewSegmentNumber() { return next_segment_number_.fetch_add(1); }
 
   // Fetch And Add n new file number
   uint64_t FetchAddFileNumber(uint64_t n) {
     return next_file_number_.fetch_add(n);
+  }
+  uint64_t FetchAddSegmentNumber(uint64_t n) {
+    return next_segment_number_.fetch_add(n);
   }
 
   // Return the last sequence number.
@@ -1658,6 +2034,7 @@ class VersionSet {
   std::string db_id_;
   const ImmutableDBOptions* const db_options_;
   std::atomic<uint64_t> next_file_number_;
+  std::atomic<uint64_t> next_segment_number_;
   // Any WAL number smaller than this should be ignored during recovery,
   // and is qualified for being deleted.
   std::atomic<uint64_t> min_log_number_to_keep_ = {0};

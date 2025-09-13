@@ -95,11 +95,35 @@ class VersionBuilder::Rep {
    private:
     const InternalKeyComparator* cmp_;
   };
-
+  struct DeletedFileGroup
+  {
+    InternalKey smallest;
+    InternalKey largest;
+    std::vector<std::vector<uint64_t>> files_;
+  };
+  struct AddedFileGroup
+  {
+    InternalKey smallest;
+    InternalKey largest;
+    std::vector<std::vector<FileMetaData*>> files_;
+  };
   struct LevelState {
     std::unordered_set<uint64_t> deleted_files;
     // Map from file number to file meta data.
     std::unordered_map<uint64_t, FileMetaData*> added_files;
+    std::unordered_map<uint64_t,FileMetaData*> added_files_for_judge;
+    std::unordered_set<uint64_t> deleted_files_for_judge;
+    std::unordered_map<uint64_t,Segment*> added_segments;
+    //std::unordered_map<uint64_t,Segment*> added_segments_by_changed;
+    std::unordered_map<uint64_t,Segment*> deleted_segments;
+    std::unordered_map<uint64_t,Segment*> deleted_segments_caused_trush;
+    //std::unordered_map<uint64_t,Segment*> deleted_segments_not_exit;
+    //std::vector<DeletedFileGroup> deleted_files_from_non_exit_segment;
+    //std::vector<AddedFileGroup> added_files_from_non_exit_segment;
+    //std::unordered_set<uint64_t> deleted_segments_history;
+    //std::unordered_set<uint64_t> added_segments_history;
+    //std::vector<Segment*> deleted_segments_not_available;
+    //std::vector<Segment*> added_segments_not_available;
   };
 
   // A class that represents the accumulated changes (like additional garbage or
@@ -250,11 +274,47 @@ class VersionBuilder::Rep {
     uint64_t garbage_blob_count_ = 0;
     uint64_t garbage_blob_bytes_ = 0;
   };
+  //std::unordered_map<uint64_t,int> deleted_files_by_segment_;
+  std::unordered_map<uint64_t,int> added_files_single;
+  std::unordered_map<uint64_t,int> added_files_by_segment_;
+  std::unordered_map<uint64_t,int> files_may_caused_trush;
+  //std::unordered_set<uint64_t>added_segment_history;
+  //std::unordered_set<uint64_t>deleted_segment_history;
 
   const FileOptions& file_options_;
   const ImmutableCFOptions* const ioptions_;
   TableCache* table_cache_;
   VersionStorageInfo* base_vstorage_;
+  mutable std::vector<std::vector<Segment*>> base_segment_;
+   /*class FileLocation {
+   public:
+    FileLocation() = default;
+    FileLocation(int level, size_t position)
+        : level_(level), position_(position) {}
+
+    int GetLevel() const { return level_; }
+    size_t GetPosition() const { return position_; }
+
+    bool IsValid() const { return level_ >= 0; }
+
+    bool operator==(const FileLocation& rhs) const {
+      return level_ == rhs.level_ && position_ == rhs.position_;
+    }
+
+    bool operator!=(const FileLocation& rhs) const { return !(*this == rhs); }
+
+    static FileLocation Invalid() { return FileLocation(); }
+
+   private:
+    int level_ = -1;
+    size_t position_ = 0;
+  };*/
+  using SegmentLocations=UnorderedMap<uint64_t,rocksdb::VersionStorageInfo::FileLocation>;
+  SegmentLocations segment_locations_;
+  int level_per_segment_level;
+  //std::atomic<uint64_t>& next_segment_number_;
+  mutable bool has_new_versionedit;
+  mutable bool has_base_segemnt_trush;
   VersionSet* version_set_;
   int num_levels_;
   LevelState* levels_;
@@ -331,10 +391,18 @@ class VersionBuilder::Rep {
       std::shared_ptr<CacheReservationManager> file_metadata_cache_res_mgr,
       ColumnFamilyData* cfd, VersionEditHandler* version_edit_handler,
       bool track_found_and_missing_files, bool allow_incomplete_valid_version)
-      : file_options_(file_options),
+      : added_files_single(),
+        added_files_by_segment_(),
+        files_may_caused_trush(),
+        file_options_(file_options),
         ioptions_(ioptions),
         table_cache_(table_cache),
         base_vstorage_(base_vstorage),
+        segment_locations_(base_vstorage->GetSegmentMap()),
+        level_per_segment_level(base_vstorage->GetLevelPerSegmentLevel()),
+        //next_segment_number_(version_set->GetSegmentNumber()),
+        has_new_versionedit(false),
+        has_base_segemnt_trush(false),
         version_set_(version_set),
         num_levels_(base_vstorage->num_levels()),
         has_invalid_levels_(false),
@@ -366,10 +434,18 @@ class VersionBuilder::Rep {
   }
 
   Rep(const Rep& other)
-      : file_options_(other.file_options_),
+      : added_files_single(other.added_files_single),
+        added_files_by_segment_(other.added_files_by_segment_),
+        files_may_caused_trush(other.files_may_caused_trush),
+        file_options_(other.file_options_),
         ioptions_(other.ioptions_),
         table_cache_(other.table_cache_),
         base_vstorage_(other.base_vstorage_),
+        segment_locations_(other.segment_locations_),
+        level_per_segment_level(base_vstorage_->GetLevelPerSegmentLevel()),
+        //next_segment_number_(other.version_set_->GetSegmentNumber()),
+        has_new_versionedit(other.has_new_versionedit),
+        has_base_segemnt_trush(other.has_base_segemnt_trush),
         version_set_(other.version_set_),
         num_levels_(other.num_levels_),
         invalid_level_sizes_(other.invalid_level_sizes_),
@@ -660,7 +736,60 @@ class VersionBuilder::Rep {
                              &ret_s);
     return ret_s;
   }
-
+  std::pair<int,int> GetLevelForSegment(int position)const
+  {
+    /*int number=0;
+    for(int i=0;i<position;i++)
+    {
+      number+=level_per_segment_level[i];
+    }
+    int number1=number+level_per_segment_level[position]-1;
+    std::pair<int,int> result(number,number1);
+    return result;*/
+    std::pair<int,int> result(position*level_per_segment_level,(1+position)*level_per_segment_level-1);
+    return result;
+  }
+  int GetInsertLevelForSegment(int level)const
+  {
+    /*int i=-1;
+    int j=0;
+    for(;i<int(level_per_segment_level.size());i++)
+    {
+      j+=level_per_segment_level[i];
+      if(j>=level)
+      {
+        break;
+      }
+    }
+    if(i==int(level_per_segment_level.size())&&j<level)
+    {
+      return (i);
+    }
+    return i;*/
+    for(int i=0;;i++)
+    {
+      if((i+1)*level_per_segment_level>level)
+      {
+        return i;
+      }
+    }
+  }
+  void MakeDeleteSegmentClear()const
+  {
+    for(int i=0;i<num_levels_;i++)
+    {
+      for(auto&j:levels_[i].deleted_segments_caused_trush)
+      {
+        delete j.second;
+      }
+      levels_[i].deleted_segments.clear();
+      levels_[i].deleted_segments_caused_trush.clear();
+      levels_[i].added_segments.clear();
+      //levels_[i].added_segments_by_changed.clear();
+      levels_[i].deleted_files_for_judge.clear();
+      levels_[i].added_files_for_judge.clear();
+    }
+  }
   Status CheckConsistency(const VersionStorageInfo* vstorage) const {
     assert(vstorage);
 
@@ -844,7 +973,116 @@ class VersionBuilder::Rep {
 
     return meta->oldest_blob_file_number;
   }
+  Status ApplyFileDeletionIncompletely(int level,uint64_t file_number)
+  {
+    const uint64_t blob_file_number =
+        GetOldestBlobFileNumberForTableFile(level, file_number);
 
+    if (blob_file_number != kInvalidBlobFileNumber)
+    {
+      MutableBlobFileMetaData* const mutable_meta =
+          GetOrCreateMutableBlobFileMetaData(blob_file_number);
+      if (mutable_meta)
+      {
+        mutable_meta->UnlinkSst(file_number);
+      }
+    }
+    auto& level_state = levels_[level];
+    auto& add_files = level_state.added_files;
+    auto add_it = add_files.find(file_number);
+    if (add_it != add_files.end())
+    {
+      UnrefFile(add_it->second);
+      add_files.erase(add_it);
+    }
+    auto& del_files = level_state.deleted_files;
+    assert(del_files.find(file_number) == del_files.end());
+
+    table_file_levels_[file_number] =
+        VersionStorageInfo::FileLocation::Invalid().GetLevel();
+
+    if (track_found_and_missing_files_)
+    {
+      assert(version_edit_handler_);
+      if (l0_missing_files_.find(file_number) != l0_missing_files_.end())
+      {
+        l0_missing_files_.erase(file_number);
+      }
+      else if (non_l0_missing_files_.find(file_number) !=non_l0_missing_files_.end())
+      {
+        non_l0_missing_files_.erase(file_number);
+      }
+      else
+      {
+        auto fiter = found_files_.find(file_number);
+        // Only mark new files added during this catchup attempt for deletion.
+        // These files were never installed in VersionStorageInfo.
+        // Already referenced files that are deleted by a VersionEdit will
+        // be added to the VersionStorageInfo's obsolete files when the old
+        // version is dereferenced.
+        if (fiter != found_files_.end()) {
+          assert(!ioptions_->cf_paths.empty());
+          found_files_.erase(fiter);
+        }
+      }
+    }
+
+    return Status::OK();
+  }
+  Status ApplyFileDeletionIncompletelyWithTrashRecycle(int level,uint64_t file_number)
+  {
+    const uint64_t blob_file_number =
+        GetOldestBlobFileNumberForTableFile(level, file_number);
+
+    if (blob_file_number != kInvalidBlobFileNumber)
+    {
+      MutableBlobFileMetaData* const mutable_meta =
+          GetOrCreateMutableBlobFileMetaData(blob_file_number);
+      if (mutable_meta)
+      {
+        mutable_meta->UnlinkSst(file_number);
+      }
+    }
+    auto& level_state = levels_[level];
+    auto& add_files = level_state.added_files;
+    auto add_it = add_files.find(file_number);
+    if (add_it != add_files.end())
+    {
+      UnrefFile(add_it->second);
+      add_files.erase(add_it);
+    }
+    auto& del_files = level_state.deleted_files;
+    assert(del_files.find(file_number) == del_files.end());
+
+    table_file_levels_[file_number] =
+        VersionStorageInfo::FileLocation::Invalid().GetLevel();
+
+    if (track_found_and_missing_files_) {
+      assert(version_edit_handler_);
+      if (l0_missing_files_.find(file_number) != l0_missing_files_.end()) {
+        l0_missing_files_.erase(file_number);
+      } else if (non_l0_missing_files_.find(file_number) !=
+                 non_l0_missing_files_.end()) {
+        non_l0_missing_files_.erase(file_number);
+      } else {
+        auto fiter = found_files_.find(file_number);
+        // Only mark new files added during this catchup attempt for deletion.
+        // These files were never installed in VersionStorageInfo.
+        // Already referenced files that are deleted by a VersionEdit will
+        // be added to the VersionStorageInfo's obsolete files when the old
+        // version is dereferenced.
+        if (fiter != found_files_.end()) {
+          assert(!ioptions_->cf_paths.empty());
+          intermediate_files_.emplace_back(
+              MakeTableFileName(ioptions_->cf_paths[0].path, file_number));
+          found_files_.erase(fiter);
+        }
+      }
+    }
+
+    return Status::OK();
+  }
+  
   Status ApplyFileDeletion(int level, uint64_t file_number) {
     assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
 
@@ -930,11 +1168,218 @@ class VersionBuilder::Rep {
 
     return Status::OK();
   }
+  Status ApplySegmentAddition(const Segment& sp,int new_level)
+  {
+      std::ostringstream oss;
+      auto it=levels_[new_level].added_segments.find(sp.GetSegmentNum());
+      if(it!=levels_[new_level].added_segments.end())
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      Segment* s=new Segment(sp);
+      levels_[new_level].added_segments.emplace(s->GetSegmentNum(),s);
+      return Status::OK();
+  }
+  Status ApplySegmentChanged(const Segment& sp,int level,int new_level)
+  {
+    std::ostringstream oss;
+      auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
+      if(it!=levels_[level].deleted_segments.end())
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      auto it1=levels_[new_level].added_segments.find(sp.GetSegmentNum());
+      if(it1!=levels_[new_level].added_segments.end())
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      auto position=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum());
+      if(position.GetLevel()==VersionStorageInfo::FileLocation::Invalid().GetLevel()||position.GetLevel()!=level)
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      Segment* seg=base_segment_[position.GetLevel()][position.GetPosition()];
+      Segment* s=new Segment(*seg);
+      levels_[level].deleted_segments.emplace(s->GetSegmentNum(),s);
+      levels_[new_level].added_segments.emplace(s->GetSegmentNum(),s);
+      /*auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
+      if(it!=levels_[level].deleted_segments.end())
+      {
+        return;
+      }
+      auto it2=levels_[level].added_segments.find(sp.GetSegmentNum());
+      if(it!=levels_[level].added_segments.end())
+      {
+        return;
+      }
+      int actual_level=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum()).GetLevel();
+      if(level!=actual_level)
+      {
+        if(actual_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
+        {
+          std::vector<std::vector<FileMetaData*>> filelist=sp.get_files();
+          for(int i=0;i<int(filelist.size());i++)
+          {
+            bool is_ok=false;
+            for(auto& file:filelist[i])
+            {
+              int based_level=GetFileLocation(file->fd.GetNumber()).GetLevel();
+              if(based_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
+              {
 
-  Status ApplyFileAddition(int level, const FileMetaData& meta) {
+              }
+              else
+              {
+                for(int i=1;;i++)
+                {
+                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1>level_per_segment_level*i-1)||(based_level>i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
+                  {
+                    is_ok=true;
+                    return;
+                  }
+                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1)&&(based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
+                  {
+                    is_ok=false;
+                    Segment* s=new Segment(sp);
+                    std::vector<std::vector<FileMetaData*>> filelist=s->get_files();
+                    for(int i=0;i<int(filelist.size());i++)
+                    {
+                      for(auto&f:filelist[i] )
+                      {
+                        FileMetaData* new_file=new FileMetaData(*f);
+                        new_file->refs=1;
+                        levels_[(level+1)*level_per_segment_level-i].deleted_files_from_non_exit_segment.emplace(f->fd.GetNumber());
+                        levels_[(new_level+1)*level_per_segment_level-i].added_files_from_non_exit_segment.emplace(f->fd.GetNumber(),new_file);
+                      }
+                    }
+                    return;
+                  }
+                }
+                break;
+              }
+            }
+            if(is_ok)
+            {
+              return;
+            }
+          }
+          return;
+        }
+        else
+        {
+          return;
+        }
+      }
+      Segment* s = new Segment(sp);
+      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+      //s->UpdateSegmentIsChanged();
+      levels_[level].deleted_segments.emplace(s->GetSegmentNum(),const_cast<Segment*>(s));
+      levels_[new_level].added_segments_by_changed.emplace(s->GetSegmentNum(),const_cast<Segment*>(s));
+      //added_segment_history.emplace(sp.GetSegmentNum());
+      //deleted_segment_history.emplace(sp.GetSegmentNum());*/
+      return Status::OK();
+      //version_updated=true;
+  }
+  rocksdb::VersionStorageInfo::FileLocation GetSegmentLocation(uint64_t segment_number)
+  {
+    const auto it = segment_locations_.find(segment_number);
+
+    if (it == segment_locations_.end()) {
+      return rocksdb::VersionStorageInfo::FileLocation::Invalid();
+    }
+
+    /*assert(it->second.GetLevel() < num_levels_);
+    assert(it->second.GetPosition() < files_[it->second.GetLevel()].size());
+    assert(files_[it->second.GetLevel()][it->second.GetPosition()]);
+    assert(files_[it->second.GetLevel()][it->second.GetPosition()]
+               ->fd.GetNumber() == file_number);*/
+
+    return it->second;
+  }
+  Status ApplySegmentDeletion(const Segment&sp,int level)
+  {
+      std::ostringstream oss;
+      auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
+      if(it!=levels_[level].deleted_segments.end())
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      auto position=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum());
+      if(position.GetLevel()==VersionStorageInfo::FileLocation::Invalid().GetLevel()||position.GetLevel()!=level)
+      {
+        return Status::Corruption("VersionBuilder", oss.str());
+      }
+      Segment* seg=base_segment_[position.GetLevel()][position.GetPosition()];
+      Segment* s=new Segment(*seg);
+      levels_[level].deleted_segments_caused_trush.emplace(s->GetSegmentNum(),s);
+      /*int actual_level=GetSegmentLocation(sp.GetSegmentNum()).GetLevel();
+      if(level!=actual_level)
+      {
+        if(actual_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
+        {
+          std::vector<std::vector<FileMetaData*>> filelist=sp.get_files();
+          for(int i=0;i<int(filelist.size());i++)
+          {
+            bool is_ok=false;
+            for(auto& file:filelist[i])
+            {
+              int based_level=GetFileLocation(file->fd.GetNumber()).GetLevel();
+              if(based_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
+              {
+
+              }
+              else
+              {
+                for(int i=1;;i++)
+                {
+                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1>level_per_segment_level*i-1)||(based_level>i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
+                  {
+                    is_ok=true;
+                    return;
+                  }
+                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1)&&(based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
+                  {
+                    is_ok=false;
+                    Segment* s=new Segment(sp);
+                    std::vector<std::vector<FileMetaData*>> filelist=s->get_files();
+                    for(int i=0;i<int(filelist.size());i++)
+                    {
+                      for(auto&f:filelist[i] )
+                      {
+                        levels_[(i+1)*level_per_segment_level-i].deleted_files_from_non_exit_segment.emplace(f->fd.GetNumber());
+                      }
+                    }
+                    return;
+                  }
+                }
+                break;
+              }
+            }
+            if(is_ok)
+            {
+              return;
+            }
+          }
+          return;
+        }
+        else
+        {
+          return;
+        }
+      }
+      //Segment* s = new Segment(sp);
+      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+      //s->UpdateSegmentIsChanged();
+      levels_[level].deleted_segments_caused_trush.emplace(sp.GetSegmentNum(),&sp);
+      //added_segment_history.emplace(sp.GetSegmentNum());
+      //deleted_segment_history.emplace(sp.GetSegmentNum());*/
+      return Status::OK();
+    }
+
+  Status ApplyFileAddition(int level, FileMetaData* meta) {
     assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
 
-    const uint64_t file_number = meta.fd.GetNumber();
+    const uint64_t file_number = meta->fd.GetNumber();
 
     const int current_level = GetCurrentLevelForTableFile(file_number);
 
@@ -965,8 +1410,8 @@ class VersionBuilder::Rep {
       del_files.erase(del_it);
     }
 
-    FileMetaData* const f = new FileMetaData(meta);
-    f->refs = 1;
+    FileMetaData*  f = meta;
+    //f->refs = 1;
 
     if (file_metadata_cache_res_mgr_) {
       Status s = file_metadata_cache_res_mgr_->UpdateCacheReservation(
@@ -987,7 +1432,6 @@ class VersionBuilder::Rep {
     auto& add_files = level_state.added_files;
     assert(add_files.find(file_number) == add_files.end());
     add_files.emplace(file_number, f);
-
     const uint64_t blob_file_number = f->oldest_blob_file_number;
 
     if (blob_file_number != kInvalidBlobFileNumber) {
@@ -1006,7 +1450,7 @@ class VersionBuilder::Rep {
       assert(!ioptions_->cf_paths.empty());
       const std::string fpath =
           MakeTableFileName(ioptions_->cf_paths[0].path, file_number);
-      s = version_edit_handler_->VerifyFile(cfd_, fpath, level, meta);
+      s = version_edit_handler_->VerifyFile(cfd_, fpath, level, *meta);
       if (s.IsPathNotFound() || s.IsNotFound() || s.IsCorruption()) {
         if (0 == level) {
           l0_missing_files_.insert(file_number);
@@ -1076,29 +1520,200 @@ class VersionBuilder::Rep {
     }
 
     // Delete table files
-    for (const auto& deleted_file : edit->GetDeletedFiles()) {
-      const int level = deleted_file.first;
-      const uint64_t file_number = deleted_file.second;
-
+    for (const auto& deleted_file : edit->GetDeletedFilesForJudge()) {
+      int level = base_vstorage_->GetFileLocation(deleted_file.second).GetLevel();
+      //auto it1=deleted_files_by_segment_.find(deleted_file.second);
+      auto it2=files_may_caused_trush.find(deleted_file.second);
+      auto it3=added_files_by_segment_.find(deleted_file.second);
+      uint64_t file_number = deleted_file.second;
+      //if(it1!=deleted_files_by_segment_.end())
+      //{
+        if(it3!=added_files_by_segment_.end())/*在这里，这个文件一定是跟随segment的换层被换到另一层了*/
+        {
+          if(it2==files_may_caused_trush.end())
+          {
+            int level1=it2->second;
+            const Status s=ApplyFileDeletionIncompletely(level1,file_number);
+            added_files_by_segment_.erase(it2);
+            if (!s.ok())
+            {
+                return s;
+            }
+            continue;
+          }
+          else
+          {
+              int level2=it2->second;
+              const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level2,file_number);
+              added_files_by_segment_.erase(it2);
+              files_may_caused_trush.erase(it3);
+              if(!s.ok())
+              {
+                return s;
+              }
+              continue;
+          }
+        }
+        else
+        {
+            
+        }
+      //}
       const Status s = ApplyFileDeletion(level, file_number);
-      if (!s.ok()) {
+      levels_[level].deleted_files_for_judge.emplace(file_number);
+      if (!s.ok())
+      {
         return s;
       }
       version_updated = true;
     }
-
     // Add new table files
-    for (const auto& new_file : edit->GetNewFiles()) {
-      const int level = new_file.first;
+    for (const auto& new_file : edit->GetNewFilesForJudge())/*在这里，插入的单个文件要么从来没有在lsm中出现，要么是换层，且换层的的删除与插入在同一个edit中，则上方已经将删除的记录删掉了，故这里不需再检查*/
+    {
+      int level = new_file.first;
       const FileMetaData& meta = new_file.second;
-
-      const Status s = ApplyFileAddition(level, meta);
-      if (!s.ok()) {
-        return s;
+      /*auto it=added_files_by_segment_.find(meta.fd.GetNumber());
+      bool label;
+      if(it==added_files_by_segment_.end())
+      {
+        FileMetaData* f = new FileMetaData(meta);
+        f->refs=1;
+        levels_[level].added_files_for_judge.emplace(f->fd.GetNumber(),f);
+        version_updated = true;
+        continue;
       }
+      for(int i=1;;i++)
+      {
+        if((level<=i*level_per_segment_level-1&&it->second>level_per_segment_level*i-1)||(level>i*level_per_segment_level-1&&it->second<=level_per_segment_level*i-1))
+        {
+          label=true;
+          break;
+        }
+        if((level<=i*level_per_segment_level-1&&it->second<=level_per_segment_level*i-1)&&(level<=i*level_per_segment_level-1&&it->second<=level_per_segment_level*i-1))
+        {
+          label=false;
+          break;
+        }
+      }
+      if(label=true)
+      {
+        auto it=files_may_caused_trush.find(meta.fd.GetNumber());
+          if(it==files_may_caused_trush.end())
+          {
+            int level=it->second;
+            const Status s=ApplyFileDeletionIncompletely(level,meta.fd.GetNumber());
+            if (!s.ok())
+            {
+                return s;
+            }
+          }
+          else
+          {
+              int level=it->second;
+              const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level,meta.fd.GetNumber());
+              if(!s.ok())
+              {
+                return s;
+              }
+          }
+      }
+      
+      //const Status s = ApplyFileAddition(level, meta);*/
+      FileMetaData* f = new FileMetaData(meta);
+      f->refs=1;
+      levels_[level].added_files_for_judge.emplace(f->fd.GetNumber(),f);
+      /*if (!s.ok())
+      {
+        return s;
+      }*/
       version_updated = true;
     }
-
+    for (const auto& deleted_segments : edit->GetDeletedSegments())
+    {
+      const int level = deleted_segments.first;
+      ApplySegmentDeletion(deleted_segments.second,level);
+      version_updated=true;
+      //std::vector<FileMetaData*> not_deleted_files;
+      //std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+      //for(int i=level_for_segment.first;i<level_for_segment.second;i++)
+      //{
+        //deleted_segments.second.RecordFileDeletion(levels_[i].deleted_files_for_judge);
+      //}
+      //deleted_segments.second.GetNotDeletedFiles(not_deleted_files);
+      //se->RecordFileDeletion(levels_[level].deleted_files_for_judge);
+      //const Status s = ApplySegmentDeletion(level, *se);
+      //for(const auto& new_file:not_deleted_files)
+      //{
+        //const Status s=ApplyFileDeletion(level,new_file->fd.GetNumber());
+        //if (!s.ok()) {
+          //return s;
+       //}
+      //}
+      /*if(level!=actual_level)
+      {
+        continue;
+      }
+      Segment* s = new Segment(deleted_segments.second);
+      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+      //s->UpdateSegmentIsChanged();
+      levels_[level].deleted_segments.emplace_back(const_cast<Segment*>(s));
+      version_updated=true;*/
+    }
+    for (const auto& changed_segments : edit->GetChangedSegments())
+    {
+      const int level = std::get<0>(changed_segments);
+      const int new_level=std::get<1>(changed_segments);
+      const Segment& sp=std::get<2>(changed_segments);
+      ApplySegmentChanged(sp,level,new_level);
+      version_updated=true;
+      /*std::vector<FileMetaData*> not_deleted_files;
+      std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+      for(int i=level_for_segment.first;i<level_for_segment.second;i++)
+      {
+        sp.RecordFileDeletion(levels_[i].deleted_files_for_judge);
+      }
+      sp.GetNotDeletedFiles(not_deleted_files);
+      //se->RecordFileDeletion(levels_[level].deleted_files_for_judge);
+      //const Status s = ApplySegmentDeletion(level, *se);
+      for(const auto& new_file:not_deleted_files)
+      {
+        const Status s=ApplyFileDeletion(level,new_file->fd.GetNumber());
+        if (!s.ok()) {
+          return s;
+        }
+      }
+      for(const auto& new_file:not_deleted_files)
+      {
+        Status s=ApplyFileAddition(new_level,*new_file);
+        if (!s.ok()) {
+          return s;
+        }
+      }*/
+    }
+    for(const auto& new_segment:edit->GetNewSegments())
+    {
+      const int level = new_segment.first;
+      /*std::vector<FileMetaData*> not_deleted_files;
+      std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+      for(int i=level_for_segment.first;i<level_for_segment.second;i++)
+      {
+        new_segment.second.RecordFileDeletion(levels_[i].deleted_files_for_judge);
+      }
+      new_segment.second.GetNotDeletedFiles(not_deleted_files);
+      for(const auto& new_file:not_deleted_files)
+      {
+        Status s=ApplyFileAddition(level,*new_file);
+        if (!s.ok()) {
+          return s;
+        }
+      }*/
+      const Segment& sp = new_segment.second;
+      ApplySegmentAddition(sp,level);
+      //Segment* s = new Segment(sp);
+      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+      //levels_[level].added_segments.emplace(s->GetSegmentNum(),s);
+     // version_updated=true;
+    }
     // Populate compact cursors for round-robin compaction, leave
     // the cursor to be empty to indicate it is invalid
     for (const auto& cursor : edit->GetCompactCursors()) {
@@ -1116,6 +1731,7 @@ class VersionBuilder::Rep {
         edited_in_atomic_group_ = true;
       }
     }
+    has_invalid_levels_=true;
     return Status::OK();
   }
 
@@ -1499,7 +2115,502 @@ class VersionBuilder::Rep {
       SaveSSTFilesTo(vstorage, level, *level_nonzero_cmp_);
     }
   }
+  void ApplySegmentFileDeletion(FileMetaData* p,int level,int num)
+  {
+          //auto it1=deleted_files_by_segment_.find(p->fd.GetNumber());
+          auto it2=files_may_caused_trush.find(p->fd.GetNumber());
+          auto it3=added_files_by_segment_.find(p->fd.GetNumber());
+          auto it4=added_files_single.find(p->fd.GetNumber());
+          uint64_t file_number = p->fd.GetNumber();
+            if(it3!=added_files_by_segment_.end())
+            {
+              if(it2==files_may_caused_trush.end())
+              {
+                int level1=it2->second;
+                const Status s=ApplyFileDeletionIncompletely(level1,file_number);
+                added_files_by_segment_.erase(it3);
+              }
+              else
+              {
+                  int level2=it2->second;
+                  const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level2,file_number);
+                  added_files_by_segment_.erase(it3);
+                  files_may_caused_trush.erase(it2);
+              }
+            }
+            else if(it4!=added_files_single.end())
+            {
+              if(it2==files_may_caused_trush.end())
+              {
+                int level3=it2->second;
+                const Status s=ApplyFileDeletionIncompletely(level3,file_number);
+                added_files_single.erase(it3);
+              }
+              else
+              {
+                  int level4=it2->second;
+                  const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level4,file_number);
+                  added_files_single.erase(it4);
+                  files_may_caused_trush.erase(it2);
+              }
+            }
+            else
+            {
+              ApplyFileDeletion((((level+1)*level_per_segment_level)-1)-num,p->fd.GetNumber());
+              //levels_[(((level+1)*level_per_segment_level)-1)-std::get<1>(p)].deleted_files.emplace(std::get<0>(p)->fd.GetNumber());
+            }
+          //deleted_files_by_segment_.emplace(file_number,(((level+1)*level_per_segment_level)-1)-num);
+  }
+  /*无法处理以下情形：
+  1.当该层级参与合并时，需确保该层级不可发生有重叠范围段的合并，否则会有重叠的文件，
+    即我们在合并时，只使用段来换层或加入一个段，尽量不删除一个段
+  2.不可发生有重叠范围段的删除（该段已经被合并消失，找不到这个段）
+  3.不允许一个层级有多个有重叠范围的段向其发生合并，否则会有段内文件新旧的问题
+  4.允许在一个segment进行换层时，对其中的一个单独的文件进行增删操作
+  5.段中的压缩由versionbuilder直接进行，不需要手动触发。我们不需传入合并后产生的段*/
+  void SaveSegmentsTo()
+{
+    //assert(vstorage);
+    std::vector<std::vector<Segment*>> base_segment_trush(base_segment_);
+    const InternalKeyComparator* cmp_=base_vstorage_->InternalComparator();
+    auto pair_comp_for_files = [&](const auto& a, const auto& b)
+    {
+        return (a->fd.GetNumber()<b->fd.GetNumber());
+    };
+    /*auto pair_comp_for_segments=[&](auto&a,auto& b)
+    {
+      if(a.first!=b.first)
+      {
+        return a.first<b.first;
+      }
+      int comp_result = cmp_->Compare(a.second->smallest, b.second->smallest);
+        if (comp_result != 0)
+        {
+          return comp_result < 0;
+        }
+        return false;
+    };*/
+    auto pair_comp_for_basesegments=[&](auto&a,auto& b)
+    {
+      int comp_result = cmp_->Compare(a->smallest, b->smallest);
+        if (comp_result != 0)
+        {
+          return comp_result < 0;
+        }
+        return false;
+    };
+    /*for(int level=0;level<num_levels_;level++)
+    {
+      for(auto& f:levels_[level].deleted_files_from_non_exit_segment)
+      {
+        levels_[level].deleted_files_for_judge.emplace(f);
+      }
+      for(auto&f:levels_[level].added_files_from_non_exit_segment)
+      {
+        auto it=levels_[level].added_files_for_judge.find(f.first);
+        if(it!=levels_[level].added_files_for_judge.end())
+        {
+          delete levels_[level].added_files_from_non_exit_segment[f.first];
+        }
+        else
+        {
+          levels_[level].added_files_for_judge.emplace(f.first,f.second);
+        }
+      }
+    }*/
+    for(int level=0;level<num_levels_;level++)/*进行基础插入*/
+    {
+      auto& base_segments = base_segment_[level];
+      std::vector<Segment*> base_segments_copy(base_segments);
+      //auto& added_files = levels_[level].added_files_for_judge;
+      //auto& added_segments=levels_[level].added_segments_by_changed;
+      auto& deleted_segments_map=levels_[level].deleted_segments;
+      auto& deleted_segments_caused_trush=levels_[level].deleted_segments_caused_trush;
+      std::vector<Segment*> deleted_segments;
+      for(auto& s:deleted_segments_map)
+      {
+        deleted_segments.emplace_back(s.second);
+      }
+      for(auto& s:deleted_segments_caused_trush)
+      {
+        deleted_segments.emplace_back(s.second);
+      }
+      //std::sort(added_files.begin(),added_files.end(), pair_comp_for_files);
+      std::sort(base_segments_copy.begin(),base_segments_copy.end(),pair_comp_for_basesegments);
+      //std::sort(added_segments.begin(), added_segments.end(), pair_comp_for_segments);
+      std::sort(deleted_segments.begin(), deleted_segments.end(), pair_comp_for_basesegments);
+      //int added_it=0;
+      int deleted_it=0;
+      int base_it=0;
+      //int added_final=added_segments.size();
+      int base_final=base_segments_copy.size();
+      //vstorage->ReserveForSegments(level, base_segments.size() + added_segments.size());
+      while(base_it<base_final)
+      {
+        if(*base_segments_copy[base_it]!=*deleted_segments[deleted_it])
+        {
+          /*base_segments_copy[base_it]->MakeActualDelete(cmp_);
+          if(base_segments_copy[base_it]->IsEmpty())
+          {
+            continue;
+          }*/
+          std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+          for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
+          {
+            base_segments_copy[base_it]->RecordFileDeletion(levels_[i].deleted_files_for_judge);
+            if(base_segments_copy[base_it]->NeedClearEmptyLevel(level_per_segment_level,0))
+            {
+              std::vector<std::tuple<FileMetaData*,int,int>> filelist=base_segments_copy[base_it]->MakeActualDeleteAndReturn(cmp_);
+              for(auto& t:filelist)
+              {
+                ApplySegmentFileDeletion(std::get<0>(t),i,std::get<1>(t));
+                ApplyFileAddition((((i+1)*level_per_segment_level)-1)-std::get<2>(t),std::get<0>(t));
+                files_may_caused_trush.emplace(std::get<0>(t)->fd.GetNumber(),(((i+1)*level_per_segment_level)-1)-std::get<2>(t));
+                added_files_by_segment_.emplace(std::get<0>(t)->fd.GetNumber(),(((i+1)*level_per_segment_level)-1)-std::get<2>(t));
+                //levels_[(((i+1)*level_per_segment_level)-1)-std::get<1>(t)].deleted_files.emplace(std::get<0>(t)->fd.GetNumber());
+                //levels_[(((i+1)*level_per_segment_level)-1)-std::get<2>(t)].added_files.emplace(std::get<0>(t)->fd.GetNumber());
+              }
+            }
+            else
+            {
+              base_segments_copy[base_it]->MakeActualDelete(cmp_);
+            }
+            //base_segments_copy[base_it]->UpdateSegmentIsChanged();
+          }
+          AddSegments(level, new Segment(*base_segments_copy[base_it]),cmp_);
+          base_it++;
+        }
+        else
+        {
+          deleted_it++;
+          base_it++;
+        }
+      }
+      for(auto& deleted_segment:deleted_segments)
+      {
+        std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+        for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
+        {
+          deleted_segment->RecordFileDeletion(levels_[level].deleted_files_for_judge);
+          std::vector<std::pair<FileMetaData*,int>> filelist=deleted_segment->MakeActualDeleteWithMiddleReturn(cmp_);
+          for(auto& p:filelist)
+          {
+            ApplySegmentFileDeletion(p.first,level,p.second);
+          }
+        }
+      }
+  }
+  /*for(int level=0;level<num_levels_;level++)
+  {
+    auto& deleted_segments_map=levels_[level].deleted_segments;
+    auto& deleted_segments_caused_trush=levels_[level].deleted_segments_caused_trush;
+    std::vector<Segment*> deleted_segments;
+    for(auto& s:deleted_segments_map)
+    {
+      deleted_segments.emplace_back(s.second);
+    }
+    for(auto&s:deleted_segments_caused_trush)
+    {
+      deleted_segments.emplace_back(s.second);
+    }
+    for(auto& deleted_segment:deleted_segments)
+    {
+      std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+      for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
+      {
+        deleted_segment->RecordFileDeletion(levels_[level].deleted_files_for_judge);
+        std::vector<std::pair<FileMetaData*,int>> filelist=deleted_segment->MakeActualDeleteWithMiddleReturn(cmp_);
+        for(auto& p:filelist)
+        {
+          ApplySegmentFileDeletion(p.first,level,p.second);
+        }
+      }
+    }
+  }*/
+  for(int level=0;level<num_levels_;level++)/*进行换层插入或不存在的段的插入*/
+  {
+      //auto& base_segments = base_vstorage_->LevelSegments(level);
+      //auto& added_files = levels_[level].added_files_for_judge;
+      auto& added_segment_map=levels_[level].added_segments;
+      std::vector<Segment*> added_segments;
+      for(auto& f:added_segment_map)
+      {
+        added_segments.emplace_back(f.second);
+      }
+      //auto& deleted_segments=levels_[level].deleted_segments;
+      //std::sort(added_files.begin(),added_files.end(), pair_comp_for_files);
+      //std::sort(base_segments.begin(),base_segments.end(),pair_comp_for_segments);
+      std::sort(added_segments.begin(), added_segments.end(), pair_comp_for_basesegments);
+      //std::sort(deleted_segments.begin(), deleted_segments.end(), pair_comp_for_segments);
+      for(auto& added_segment:added_segments)
+      {
+        //int level_=added_segments.find(deleted_segment.second)->second;/*用指针是否正确*/
+        /*std::pair<int,int> level_for_segment=GetLevelForSegment(level);
+        for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
+        {
+          added_segment->RecordFileDeletion(levels_[i].deleted_files_for_judge);
+          added_segment->MakeActualDelete(cmp_);
+          //added_segment->UpdateSegmentIsChanged();
+        }
+        auto after_deleted_files=added_segment->get_files();
+        for(int i=0;i<int(after_deleted_files.size());i++)
+        {
+          for(auto file:after_deleted_files[i])
+          {
 
+          }
+        }*/
+        std::vector<std::pair<FileMetaData*,int>>filelist=AddSegmentsAndMerge(level,added_segment,cmp_);
+        for(auto& sample_pair:filelist)
+        {
+          ApplyFileAddition((level+1)*level_per_segment_level-sample_pair.second,sample_pair.first);
+          files_may_caused_trush.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
+          added_files_by_segment_.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
+          //levels_[(level+1)*level_per_segment_level-sample_pair.second].added_files.emplace(sample_pair.first);
+        }
+      }
+  }
+  for(int level=0;level<num_levels_;level++)
+  {
+     //int actual_level=vstorage->GetInsertLevelForSegment(level);
+     int actual_level=GetInsertLevelForSegment(level);
+     auto& added_files_map = levels_[actual_level].added_files_for_judge;
+     std::vector<FileMetaData*> added_files;
+     for(auto&f:added_files_map)
+     {
+      added_files.emplace_back(f.second);
+     }
+     std::sort(added_files.begin(),added_files.end(),pair_comp_for_files);
+     std::vector<std::pair<FileMetaData*,int>>result=AddFileForSegments(actual_level,added_files,cmp_);
+     for(auto& sample_pair:result)
+     {
+        ApplyFileAddition((level+1)*level_per_segment_level-sample_pair.second,sample_pair.first);
+        files_may_caused_trush.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
+        added_files_single.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
+        //levels_[(level+1)*level_per_segment_level-sample_pair.second].added_files.emplace(sample_pair.first);
+     }
+  }
+  MakeDeleteSegmentClear();
+  if(has_base_segemnt_trush)
+  {
+    for(auto& p:base_segment_trush)
+    {
+      for(auto&q:p)
+      {
+        delete q;
+      }
+    }
+  }
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      for (size_t pos = 0; pos < base_segment_[level].size(); ++pos)
+      {
+        base_segment_[level][pos]->RebuildFileLocation();
+      }
+    }
+  //vstorage->RebuildSegmentsMap();
+  //vstorage->UpdateSegmentsLevel();
+  has_new_versionedit=false;
+  has_base_segemnt_trush=true;
+}
+void ActualSaveSegmentsTo(VersionStorageInfo* vstorage)
+{
+  if(has_new_versionedit)
+  {
+    SaveSegmentsTo();
+  }
+  vstorage->CopySegment(base_segment_);
+  has_new_versionedit=false;
+  has_base_segemnt_trush=false;
+  files_may_caused_trush.clear();
+}
+void AddSegments(int level,Segment* segments,const InternalKeyComparator* cmp)
+  {
+    
+    for(int i=int(base_segment_.size());i<(level+1);i++)
+    {
+      base_segment_.emplace_back(std::vector<Segment*>());
+      //num_segments_level_++;
+    }
+    //segments->MakeActualDelete(cmp);
+    if(!segments->IsEmpty())
+    {
+        base_segment_[level].emplace_back(segments);
+    }
+  }
+ std::vector<std::pair<FileMetaData*,int>> AddFileForSegments(int level,std::vector<FileMetaData*> added_files,const InternalKeyComparator* cmp)const
+  {
+    std::vector<std::pair<FileMetaData*,int>> return_vector;
+    if(level>=int(base_segment_.size()))
+    {
+      base_segment_.resize(level+1);
+      
+    }
+    for(auto& new_file:added_files)
+    {
+      auto& level_segments = base_segment_[level];
+      std::vector<Segment*> overlapping_segments;
+      int position=-1;
+      int total=0;
+      int middle=-1;
+      if(level_segments.empty())
+      {
+          const Comparator* ucmp = base_vstorage_->user_comparator();
+          base_segment_[level].emplace_back(new Segment(new_file,ucmp));
+          continue;
+      }
+      for (auto& exiting_segments:level_segments)
+      {
+          middle++;
+          bool overlaps = cmp->Compare(new_file->smallest, exiting_segments->largest) <= 0 &&
+            cmp->Compare(new_file->largest, exiting_segments->smallest) >= 0;
+          if (overlaps)
+          {
+            if(position==-1)
+            {
+              position=middle;
+            }
+            total++;
+            overlapping_segments.emplace_back(exiting_segments);
+          }
+          if(position!=-1)
+          {
+            break;
+          }
+      }
+      if (overlapping_segments.empty())
+      {
+        if(cmp->Compare(new_file->smallest,level_segments.back()->largest)>0)
+        {
+          const Comparator* ucmp = base_vstorage_->user_comparator();
+          Segment* s=new Segment(new_file,ucmp);
+          s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+          level_segments.emplace_back(s);
+          return_vector.emplace_back(new_file,level);
+          continue;
+        }
+        else
+        {
+          const Comparator* ucmp = base_vstorage_->user_comparator();
+          Segment* s=new Segment(new_file,ucmp);
+          s->UpdateSegmentNum(version_set_->NewSegmentNumber());
+          level_segments.emplace(level_segments.begin(),s);
+          return_vector.emplace_back(new_file,level);
+          continue;
+        }
+      }
+      Segment* sp=new Segment(*overlapping_segments[0]);
+      overlapping_segments[0]=sp;
+      overlapping_segments[0]->UpdateSegmentNum(version_set_->NewSegmentNumber());
+      for(int i=1;i<int(overlapping_segments.size());i++)
+      {
+        const std::vector<std::vector<FileMetaData*>> should_added_files= overlapping_segments[i]->get_files();
+        overlapping_segments[0]->AppendFileListAtLast(should_added_files,overlapping_segments[i]->largest);
+      }
+      /*FileMetaData* actual_new_file=new FileMetaData(*new_file);
+      actual_new_file->refs=1;*/
+      int new_level=overlapping_segments[0]->AddFile(new_file,cmp);
+      for(int i=1;i<int(overlapping_segments.size());i++)
+      {
+        delete overlapping_segments[i];
+      }
+      base_segment_[level][position]=overlapping_segments[0];
+      for(int i=1;i<total;i++)
+      {
+        base_segment_[level].erase(base_segment_[level].begin()+position+i);
+      }
+      return_vector.emplace_back(new_file,new_level);
+    }
+    return return_vector;
+  }
+  std::vector<std::pair<FileMetaData*,int>> AddSegmentsAndMerge(int level,Segment* new_segment,const InternalKeyComparator* cmp)const
+  {
+    if (level >= int(base_segment_.size()))
+    {
+      base_segment_.resize(level + 1);
+      //num_segments_level_=(level+1);
+    }
+    //new_segment->MakeActualDelete(cmp);
+    if(new_segment->IsEmpty())
+    {
+        std::vector<std::pair<FileMetaData*,int>> return_vector;
+        return return_vector;
+    }
+    auto& level_segments = base_segment_[level];
+    std::vector<Segment*> overlapping_segments;
+    int position=-1;
+    int total=0;
+    int middle=-1;
+    for (auto& exiting_segments:level_segments)
+    {
+        middle++;
+        bool overlaps = cmp->Compare(new_segment->smallest, exiting_segments->largest) <= 0 &&
+            cmp->Compare(new_segment->largest, exiting_segments->smallest) >= 0;
+        if (overlaps)
+        {
+          if(position==-1)
+          {
+            position=middle;
+          }
+          total++;
+          overlapping_segments.emplace_back(exiting_segments);
+          continue;
+        }
+        if(position!=-1)
+        {
+          break;
+        }
+    }
+    if (overlapping_segments.empty())
+    {
+        if(cmp->Compare(new_segment->smallest,level_segments.back()->largest)>0)
+        {
+          level_segments.push_back(new_segment);
+          std::vector<std::vector<FileMetaData*>> filelist=new_segment->get_files();
+          std::vector<std::pair<FileMetaData*,int>> return_vector;
+          for(int i=0;i<int(filelist.size());i++)
+          {
+            for(auto&file:filelist[i])
+            {
+              return_vector.emplace_back(file,i);
+            }
+          }
+          return return_vector;
+        }
+        else{
+          level_segments.insert(level_segments.begin(),new_segment);
+          std::vector<std::vector<FileMetaData*>> filelist=new_segment->get_files();
+          std::vector<std::pair<FileMetaData*,int>> return_vector;
+          for(int i=0;i<int(filelist.size());i++)
+          {
+            for(auto&file:filelist[i])
+            {
+              return_vector.emplace_back(file,i);
+            }
+          }
+          return return_vector;
+        }
+    }
+    Segment* s=new Segment(*overlapping_segments[0]);
+    overlapping_segments[0]=s;
+    overlapping_segments[0]->UpdateSegmentNum(version_set_->NewSegmentNumber());
+    for(int i=1;i<int(overlapping_segments.size());i++)
+    {
+      const std::vector<std::vector<FileMetaData*>> added_files= overlapping_segments[i]->get_files();
+      overlapping_segments[0]->AppendFileListAtLast(added_files,overlapping_segments[i]->largest);
+    }
+    std::vector<std::pair<FileMetaData*,int>>return_vector=overlapping_segments[0]->AddFiles(new_segment->get_files(),cmp);
+    for(int i=1;i<int(overlapping_segments.size());i++)
+    {
+      delete overlapping_segments[i];
+    }
+    base_segment_[level][position]=overlapping_segments[0];
+    for(int i=1;i<total;i++)
+    {
+      base_segment_[level].erase(base_segment_[level].begin()+position+i);
+    }
+    return return_vector;
+  }
   void SaveCompactCursorsTo(VersionStorageInfo* vstorage) const {
     for (auto iter = updated_compact_cursors_.begin();
          iter != updated_compact_cursors_.end(); iter++) {
@@ -1610,7 +2721,7 @@ class VersionBuilder::Rep {
   }
 
   // Save the current state in *vstorage.
-  Status SaveTo(VersionStorageInfo* vstorage) const {
+  Status SaveTo(VersionStorageInfo* vstorage)  {
     assert(!track_found_and_missing_files_ || valid_version_available_);
     Status s;
 
@@ -1627,11 +2738,15 @@ class VersionBuilder::Rep {
       return s;
     }
 
-    SaveSSTFilesTo(vstorage);
+    ActualSaveSegmentsTo(vstorage);
+    vstorage->AddFilesAfterSegment();
+    //SaveSSTFilesTo(vstorage);
 
     SaveBlobFilesTo(vstorage);
 
     SaveCompactCursorsTo(vstorage);
+
+    
 
     s = CheckConsistency(vstorage);
     return s;
@@ -1650,7 +2765,10 @@ class VersionBuilder::Rep {
         table_cache_->get_cache().get()->GetCapacity();
     bool always_load = (table_cache_capacity == TableCache::kInfiniteCapacity);
     size_t max_load = std::numeric_limits<size_t>::max();
-
+    if(has_new_versionedit)
+    {
+      SaveSegmentsTo();
+    }
     if (!always_load) {
       // If it is initial loading and not set to always loading all the
       // files, we only load up to kInitialLoadLimit files, to limit the
@@ -1761,7 +2879,7 @@ VersionBuilder::VersionBuilder(
                    version_edit_handler, track_found_and_missing_files,
                    allow_incomplete_valid_version)) {}
 
-VersionBuilder::~VersionBuilder() = default;
+VersionBuilder::~VersionBuilder() =default;
 
 bool VersionBuilder::CheckConsistencyForNumLevels() {
   return rep_->CheckConsistencyForNumLevels();
