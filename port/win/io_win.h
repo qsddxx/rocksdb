@@ -213,7 +213,11 @@ class WinMmapFile : private WinFileData, public FSWritableFile {
                   IODebugContext* dbg) override {
     return Append(data, opts, dbg);
   }
-
+  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg)override{return IOStatus::OK();};
+  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg)override{return IOStatus::OK();};
   // Means Close() will properly take care of truncate
   // and it does not need any additional information
   IOStatus Truncate(uint64_t size, const IOOptions& options,

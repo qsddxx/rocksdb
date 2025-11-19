@@ -9,7 +9,9 @@
 // dependencies with optimized performance (e.g. folly::F14FastMap).
 
 #pragma once
-
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include "rocksdb/rocksdb_namespace.h"
 
 #ifdef USE_FOLLY

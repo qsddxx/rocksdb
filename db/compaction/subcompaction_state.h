@@ -160,6 +160,15 @@ class SubcompactionState {
     for (const auto& file : compaction_outputs_.outputs_) {
       out_edit->AddFile(compaction->output_level(), file.meta);
     }
+    if(!compaction->next_level)
+    {
+      for (const auto& file : proximal_level_outputs_.outputs_) {
+        out_edit->AddCompactionAddedFiles(file.meta.fd.GetNumber());
+      }
+      for (const auto& file : compaction_outputs_.outputs_) {
+        out_edit->AddCompactionAddedFiles(file.meta.fd.GetNumber());
+      }
+    }
   }
 
   void Cleanup(Cache* cache);

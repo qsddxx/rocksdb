@@ -32,6 +32,7 @@ LIB_SOURCES =                                                   \
   db/builder.cc                                                 \
   db/c.cc                                                       \
   db/coalescing_iterator.cc                                     \
+  db/compaction/compaction_picker_segment.cc                    \
   db/column_family.cc                                           \
   db/compaction/compaction.cc                                   \
   db/compaction/compaction_iterator.cc                          \
@@ -117,6 +118,7 @@ LIB_SOURCES =                                                   \
   env/fs_remap.cc                                               \
   env/file_system_tracer.cc                                     \
   env/io_posix.cc                                               \
+  env/io_async.cc                                               \
   env/mock_env.cc                                               \
   env/unique_id_gen.cc                                          \
   file/delete_scheduler.cc                                      \

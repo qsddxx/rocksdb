@@ -64,6 +64,7 @@
 #include "util/string_util.h"
 #include "util/thread_local.h"
 #include "util/threadpool_imp.h"
+#include "io_async.h"
 
 #if !defined(TMPFS_MAGIC)
 #define TMPFS_MAGIC 0x01021994
@@ -330,7 +331,14 @@ class PosixFileSystem : public FileSystem {
         return s;
       }
     }
-    if (options.use_mmap_writes && !forceMmapOff_) {
+    if(options.use_io_uring_writes)
+    {
+      EnvOptions no_mmap_writes_options = options;
+      no_mmap_writes_options.use_mmap_writes = false;
+      result->reset(new AsyncPosixWritableFile(fname,fd,GetLogicalBlockSizeForWriteIfNeeded(no_mmap_writes_options, fname, fd),
+          no_mmap_writes_options, initial_file_size,GetRing(),GetCompactionIdToWriteNumMap()));
+    }
+    else if (options.use_mmap_writes && !forceMmapOff_) {
       result->reset(
           new PosixMmapFile(fname, fd, page_size_, options, initial_file_size));
     } else if (options.use_direct_writes && !options.use_mmap_writes) {

@@ -8,7 +8,9 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/version_set.h"
-
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -1241,7 +1243,15 @@ VersionStorageInfo::~VersionStorageInfo()
   {
     for(auto&j: segments_[i])
     {
-      delete j;
+      if(j->refs.load()==1)
+      {
+        delete &(j->get_same_files());
+        delete j;
+      }
+      else
+      {
+        j->refs.fetch_sub(1);
+      }
     }
   }
 }
@@ -2667,6 +2677,8 @@ VersionStorageInfo::VersionStorageInfo(
     compact_cursor_ = ref_vstorage->compact_cursor_;
     compact_cursor_.resize(num_levels_);
   }
+  segments_.resize(num_levels_/level_per_segment_level);
+  num_segments_level_=num_levels_/level_per_segment_level;
 }
 
 Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
@@ -2699,7 +2711,7 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
           cfd_ == nullptr ? 0
                           : mutable_cf_options.bottommost_file_compaction_delay,
           vset->offpeak_time_option(),cfd_ == nullptr ? 10
-                          : cfd_->current()->GetStorageInfo()->GetLevelPerSegmentLevel()),
+                          : mutable_cf_options_.level_per_segment_level),
       vset_(vset),
       next_(this),
       prev_(this),
@@ -3562,6 +3574,7 @@ void VersionStorageInfo::PrepareForVersionAppend(
   GenerateFileLocationIndex();
   GenerateFileIndexInSegment();
   GenerateSegmentIndex();
+  GenerateFileToSegmentIndex();
 }
 
 void Version::PrepareAppend(const ReadOptions& read_options,
@@ -3822,6 +3835,7 @@ void VersionStorageInfo::EstimateCompactionBytesNeeded(
 }
 
 namespace {
+  /*
 uint32_t GetExpiredTtlFilesCount(const ImmutableOptions& ioptions,
                                  const MutableCFOptions& mutable_cf_options,
                                  const std::vector<FileMetaData*>& files) {
@@ -3843,7 +3857,8 @@ uint32_t GetExpiredTtlFilesCount(const ImmutableOptions& ioptions,
   }
   return ttl_expired_files_count;
 }
-
+  */
+/*
 bool ShouldChangeFileTemperature(const ImmutableOptions& ioptions,
                                  const MutableCFOptions& mutable_cf_options,
                                  const std::vector<FileMetaData*>& files) {
@@ -3892,11 +3907,18 @@ bool ShouldChangeFileTemperature(const ImmutableOptions& ioptions,
   }
   return false;
 }
+  */
 }  // anonymous namespace
+void VersionStorageInfo::ComputeCompactionScore_Segment(
+    const ImmutableOptions& immutable_options,
+    const MutableCFOptions& mutable_cf_options) 
+{
 
+}
 void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableOptions& immutable_options,
     const MutableCFOptions& mutable_cf_options) {
+      /*
   double total_downcompact_bytes = 0.0;
   // Historically, score is defined as actual bytes in a level divided by
   // the level's target size, and 1.0 is the threshold for triggering
@@ -4080,8 +4102,24 @@ void VersionStorageInfo::ComputeCompactionScore(
 
   // sort all the levels based on their score. Higher scores get listed
   // first. Use bubble sort because the number of entries are small.
-  for (int i = 0; i < num_levels() - 2; i++) {
-    for (int j = i + 1; j < num_levels() - 1; j++) {
+  */
+  for(int i=0;i<num_segment_levels_;i++)
+  {
+    for(auto& segment_:segments_[i])
+    {
+      if(segment_->being_compacted)
+      {
+        continue;
+      }
+      if(segment_->GetNotEmptyLevel()>=immutable_options.level_segment_max_sorted_run_num[i])
+      {
+        compaction_level_.emplace_back(segment_->GetSegmentNum());
+        compaction_score_.emplace_back(static_cast<double>(segment_->GetNotEmptyLevel())/static_cast<double>(immutable_options.level_segment_max_sorted_run_num[i]));
+      }
+    }
+  }
+  for (int i = 0; i <= static_cast<int>(compaction_level_.size()) - 2; i++) {
+    for (int j = i + 1; j <= static_cast<int>(compaction_level_.size()) - 1; j++) {
       if (compaction_score_[i] < compaction_score_[j]) {
         double score = compaction_score_[i];
         int level = compaction_level_[i];
@@ -4092,6 +4130,7 @@ void VersionStorageInfo::ComputeCompactionScore(
       }
     }
   }
+  /*
   ComputeFilesMarkedForCompaction(max_output_level);
   ComputeBottommostFilesMarkedForCompaction(
       immutable_options.cf_allow_ingest_behind ||
@@ -4106,6 +4145,7 @@ void VersionStorageInfo::ComputeCompactionScore(
       mutable_cf_options.enable_blob_garbage_collection);
 
   EstimateCompactionBytesNeeded(mutable_cf_options);
+  */
 }
 
 void VersionStorageInfo::ComputeFilesMarkedForCompaction(int last_level) {
@@ -5623,6 +5663,7 @@ VersionSet::VersionSet(
       db_options_(_db_options),
       next_file_number_(2),
       next_segment_number_(2),
+      next_compaction_number_(2),
       manifest_file_number_(0),  // Filled by Recover()
       options_file_number_(0),
       options_file_size_(0),
@@ -5725,6 +5766,7 @@ void VersionSet::Reset() {
   db_id_.clear();
   next_file_number_.store(2);
   next_segment_number_.store(2);
+  next_compaction_number_.store(2);
   min_log_number_to_keep_.store(0);
   manifest_file_number_ = 0;
   options_file_number_ = 0;

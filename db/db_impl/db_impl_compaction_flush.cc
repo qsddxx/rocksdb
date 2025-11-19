@@ -216,6 +216,8 @@ Status DBImpl::FlushMemTableToOutputFile(
       true /* sync_output_directory */, true /* write_manifest */, thread_pri,
       io_tracer_, cfd->GetSuperVersion()->ShareSeqnoToTimeMapping(), db_id_,
       db_session_id_, cfd->GetFullHistoryTsLow(), &blob_callback_);
+  flush_job.flushjob_id=versions_->NewCompactionNumber();
+  immutable_db_options_.fs->compaction_id_to_file_num_map.insert(flush_job.flushjob_id,0);
   FileMetaData file_meta;
 
   Status s;
@@ -1875,6 +1877,12 @@ Status DBImpl::ReFitLevel(ColumnFamilyData* cfd, int level, int target_level) {
         versions_->LogAndApply(cfd, read_options, write_options, &edit, &mutex_,
                                directories_.GetDbDir());
     c->MarkFilesBeingCompacted(false);
+    for(auto num:c->segment_number)
+    {
+      Segment* segment_=c->GetVersionStorageInfo()->GetSegment(num);
+      segment_->being_compacted=false;
+    }
+    
     cfd->compaction_picker()->UnregisterCompaction(c.get());
     c.reset();
 
@@ -3400,15 +3408,15 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
 
 void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
                                       Env::Priority bg_thread_pri) {
-  bool made_progress = false;
-  JobContext job_context(next_job_id_.fetch_add(1), true);
+  bool made_progress = false;//全局变量六
+  JobContext job_context(next_job_id_.fetch_add(1), true);//全局变量七
   TEST_SYNC_POINT("BackgroundCallCompaction:0");
   if (bg_thread_pri == Env::Priority::BOTTOM) {
     TEST_SYNC_POINT("BackgroundCallCompaction:0:BottomPri");
   }
 
   LogBuffer log_buffer(InfoLogLevel::INFO_LEVEL,
-                       immutable_db_options_.info_log.get());
+                       immutable_db_options_.info_log.get());//全局变量八
   {
     InstrumentedMutexLock l(&mutex_);
 
@@ -3416,7 +3424,7 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
 
     std::unique_ptr<std::list<uint64_t>::iterator>
         pending_outputs_inserted_elem(new std::list<uint64_t>::iterator(
-            CaptureCurrentFileNumberInPendingOutputs()));
+            CaptureCurrentFileNumberInPendingOutputs()));//全局变量九
 
     assert((bg_thread_pri == Env::Priority::BOTTOM &&
             bg_bottom_compaction_scheduled_) ||
@@ -3440,7 +3448,7 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
           default_cf_internal_stats_->BumpAndGetBackgroundErrorCount();
       bg_cv_.SignalAll();  // In case a waiter can proceed despite the error
       mutex_.Unlock();
-      log_buffer.FlushBufferToLog();
+      log_buffer.FlushBufferToLog();//需要传入
       ROCKS_LOG_ERROR(immutable_db_options_.info_log,
                       "Waiting after background compaction error: %s, "
                       "Accumulated background error counts: %" PRIu64,
@@ -3453,7 +3461,7 @@ void DBImpl::BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
       ManualCompactionState* m = prepicked_compaction->manual_compaction_state;
       assert(m);
       ROCKS_LOG_BUFFER(&log_buffer, "[%s] [JOB %d] Manual compaction paused",
-                       m->cfd->GetName().c_str(), job_context.job_id);
+                       m->cfd->GetName().c_str(), job_context.job_id);//需要传入
     }
 
     ReleaseFileNumberFromPendingOutputs(pending_outputs_inserted_elem);
@@ -3534,7 +3542,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   ManualCompactionState* manual_compaction =
       prepicked_compaction == nullptr
           ? nullptr
-          : prepicked_compaction->manual_compaction_state;
+          : prepicked_compaction->manual_compaction_state;//全局变量十
   *made_progress = false;
   mutex_.AssertHeld();
   TEST_SYNC_POINT("DBImpl::BackgroundCompaction:Start");
@@ -3542,8 +3550,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   const ReadOptions read_options(Env::IOActivity::kCompaction);
   const WriteOptions write_options(Env::IOActivity::kCompaction);
 
-  bool is_manual = (manual_compaction != nullptr);
-  std::unique_ptr<Compaction> c;
+  bool is_manual = (manual_compaction != nullptr);//全局变量四
+  std::unique_ptr<Compaction> c;//全局变量十一
   if (prepicked_compaction != nullptr &&
       prepicked_compaction->compaction != nullptr) {
     c.reset(prepicked_compaction->compaction);
@@ -3554,7 +3562,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   bool trivial_move_disallowed =
       is_manual && manual_compaction->disallow_trivial_move;
 
-  CompactionJobStats compaction_job_stats;
+  CompactionJobStats compaction_job_stats;//全局变量五
   // Set is_remote_compaction to true on CompactionBegin Event if
   // compaction_service is set except for trivial moves. We do not know whether
   // remote compaction will actually be successfully scheduled, or fall back to
@@ -3603,7 +3611,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
 
   std::unique_ptr<TaskLimiterToken> task_token;
 
-  bool sfm_reserved_compact_space = false;
+  bool sfm_reserved_compact_space = false;//全局变量三
   if (is_manual) {
     ManualCompactionState* m = manual_compaction;
     assert(m->in_progress);
@@ -3667,7 +3675,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     ColumnFamilyData* cfd = nullptr;
 
     if (!need_repick) {
-      cfd = PickCompactionFromQueue(&task_token, log_buffer);
+      cfd = PickCompactionFromQueue(&task_token, log_buffer);//选择cfd
       if (cfd == nullptr) {
         // Can't find any executable task from the compaction queue.
         // All tasks have been throttled by compaction thread limiter.
@@ -3713,7 +3721,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
       c.reset(cfd->PickCompaction(
           mutable_cf_options, mutable_db_options_, job_context->snapshot_seqs,
           job_context->snapshot_checker, log_buffer,
-          thread_pri == Env::Priority::BOTTOM /* require_max_output_level */));
+          thread_pri == Env::Priority::BOTTOM /* require_max_output_level */));//选文件
       if (thread_pri == Env::Priority::LOW) {
         TEST_SYNC_POINT("DBImpl::BackgroundCompaction():AfterPickCompaction");
       } else if (thread_pri == Env::Priority::BOTTOM) {
@@ -3734,7 +3742,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
               ->storage_info()
               ->ComputeCompactionScore(c->immutable_options(),
                                        c->mutable_cf_options());
-          EnqueuePendingCompaction(cfd);
+          EnqueuePendingCompaction(cfd);//往compaction_queue中插入
 
           c.reset();
           // Don't need to sleep here, because BackgroundCallCompaction
@@ -3776,13 +3784,15 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   }
 
   IOStatus io_s;
-  bool compaction_released = false;
+  bool compaction_released = false;//全局变量2
   if (!c) {
     // Nothing to do
     ROCKS_LOG_BUFFER(log_buffer, "Compaction nothing to do");
   } else if (c->deletion_compaction()) {
     // TODO(icanadi) Do we want to honor snapshots here? i.e. not delete old
     // file if there is alive snapshot pointing to it
+    c->compaction_id=versions_->NewCompactionNumber();
+    immutable_db_options_.fs->compaction_id_to_file_num_map.insert(c->compaction_id,0);
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:BeforeCompaction",
                              c->column_family_data());
     assert(c->num_input_files(1) == 0);
@@ -3818,6 +3828,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:AfterCompaction",
                              c->column_family_data());
   } else if (c->is_trivial_copy_compaction()) {
+    c->compaction_id=versions_->NewCompactionNumber();
+    immutable_db_options_.fs->compaction_id_to_file_num_map.insert(c->compaction_id,0);
     TEST_SYNC_POINT_CALLBACK(
         "DBImpl::BackgroundCompaction:TriviaCopyBeforeCompaction",
         c->column_family_data());
@@ -4058,6 +4070,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         "DBImpl::BackgroundCompaction:TriviaCopyAfterCompaction",
         c->column_family_data());
   } else if (!trivial_move_disallowed && c->IsTrivialMove()) {
+    c->compaction_id=versions_->NewCompactionNumber();
+    immutable_db_options_.fs->compaction_id_to_file_num_map.insert(c->compaction_id,0);
     TEST_SYNC_POINT("DBImpl::BackgroundCompaction:TrivialMove");
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:BeforeCompaction",
                              c->column_family_data());
@@ -4147,7 +4161,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     ThreadStatusUtil::ResetThreadStatus();
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:AfterCompaction",
                              c->column_family_data());
-  } else if (!is_prepicked &&
+  } else if (!is_prepicked &&//删掉
              Compaction::OutputToNonZeroMaxOutputLevel(
                  c->output_level(),
                  c->column_family_data()
@@ -4191,6 +4205,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     env_->Schedule(&DBImpl::BGWorkBottomCompaction, ca, Env::Priority::BOTTOM,
                    this, &DBImpl::UnscheduleCompactionCallback);
   } else {
+
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:BeforeCompaction",
                              c->column_family_data());
     int output_level __attribute__((__unused__));
@@ -4200,6 +4215,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     InitSnapshotContext(job_context);
     assert(is_snapshot_supported_ || snapshots_.empty());
 
+    c->compaction_id=versions_->NewCompactionNumber();
+    immutable_db_options_.fs->compaction_id_to_file_num_map.insert(c->compaction_id,0);
     CompactionJob compaction_job(
         job_context->job_id, c.get(), immutable_db_options_,
         mutable_db_options_, file_options_for_compaction_, versions_.get(),
@@ -4215,9 +4232,10 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         db_id_, db_session_id_, c->column_family_data()->GetFullHistoryTsLow(),
         c->trim_ts(), &blob_callback_, &bg_compaction_scheduled_,
         &bg_bottom_compaction_scheduled_);
+    compaction_job.compaction_id=c->compaction_id;
     compaction_job.Prepare(std::nullopt /*subcompact to be computed*/);
 
-    std::unique_ptr<std::list<uint64_t>::iterator> min_options_file_number_elem;
+    std::unique_ptr<std::list<uint64_t>::iterator> min_options_file_number_elem;//全局变量一
     if (immutable_db_options().compaction_service != nullptr) {
       min_options_file_number_elem.reset(
           new std::list<uint64_t>::iterator(CaptureOptionsFileNumber()));
@@ -4236,21 +4254,22 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     }
 
     // Should handle error?
+    immutable_db_options_.fs->compaction_id_to_file_num_map.insert(c->compaction_id,0);
     compaction_job.Run().PermitUncheckedError();
     TEST_SYNC_POINT("DBImpl::BackgroundCompaction:NonTrivial:AfterRun");
     mutex_.Lock();
-
+//从这里是第三部分
     if (immutable_db_options().compaction_service != nullptr) {
-      ReleaseOptionsFileNumber(min_options_file_number_elem);
+      ReleaseOptionsFileNumber(min_options_file_number_elem);//min需要传入
     }
 
-    status = compaction_job.Install(&compaction_released);
-    io_s = compaction_job.io_status();
+    status = compaction_job.Install(&compaction_released);//需要新建变量status，compaction released需要传入
+    io_s = compaction_job.io_status();//需要新建变量
     if (status.ok()) {
       InstallSuperVersionAndScheduleWork(
-          c->column_family_data(), job_context->superversion_contexts.data());
+          c->column_family_data(), job_context->superversion_contexts.data());//上一个的参数
     }
-    *made_progress = true;
+    *made_progress = true;//上一个的参数
     TEST_SYNC_POINT_CALLBACK("DBImpl::BackgroundCompaction:AfterCompaction",
                              c->column_family_data());
   }
@@ -4261,7 +4280,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     io_s.PermitUncheckedError();
   }
 
-  if (c != nullptr) {
+  if (c != nullptr) {//c需要传入
     if (!compaction_released) {
       c->ReleaseCompactionFiles(status);
     } else {
@@ -4287,12 +4306,12 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     // Need to make sure SstFileManager does its bookkeeping
     auto sfm = static_cast<SstFileManagerImpl*>(
         immutable_db_options_.sst_file_manager.get());
-    if (sfm && sfm_reserved_compact_space) {
+    if (sfm && sfm_reserved_compact_space) {//sfm_reserved需要传入
       sfm->OnCompactionCompletion(c.get());
     }
 
     NotifyOnCompactionCompleted(c->column_family_data(), c.get(), status,
-                                compaction_job_stats, job_context->job_id);
+                                compaction_job_stats, job_context->job_id);//compaction_job_stats需要传入
   }
 
   if (status.ok() || status.IsCompactionTooLarge() ||
@@ -4334,8 +4353,8 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   // this will unref its input_version and column_family_data
   c.reset();
 
-  if (is_manual) {
-    ManualCompactionState* m = manual_compaction;
+  if (is_manual) {//is_manual需要传入
+    ManualCompactionState* m = manual_compaction;//manual_compaction需要传入
     if (!status.ok()) {
       m->status = status;
       m->done = true;
@@ -4372,7 +4391,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   TEST_SYNC_POINT("DBImpl::BackgroundCompaction:Finish");
   return status;
 }
-
+//这里能不能不要
 // Create an intended compaction to forward based on the original picked
 // compaction. It serves two purposes while it is waiting
 // for a bottom-priority thread becomes available to run:
@@ -4409,7 +4428,7 @@ Compaction* DBImpl::CreateIntendedCompactionForwardedToBottomPriorityPool(
   assert(max_intput_level_files);
   assert(!max_intput_level_files->empty());
   inputs[0].level = max_intput_level;
-
+//这里能不能不要
   if (max_intput_level == 0) {
     // The last input file
     inputs[0].files.push_back(

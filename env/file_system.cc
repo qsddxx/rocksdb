@@ -3,7 +3,7 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 //
-#include "rocksdb/file_system.h"
+#include "../include/rocksdb/file_system.h"
 
 #include "env/composite_env_wrapper.h"
 #include "env/env_chroot.h"
@@ -21,8 +21,22 @@
 #include "utilities/env_timed.h"
 
 namespace ROCKSDB_NAMESPACE {
+  /*
+folly::AtomicHashMap<uint64_t, int>::Config MakeConfig() {  
+  folly::AtomicHashMap<uint64_t, int>::Config config;  
+  config.emptyKey = -1;  
+  config.lockedKey = -2;  
+  config.erasedKey = -3;  
+  return config;  
+} */
 
-FileSystem::FileSystem() = default;
+FileSystem::FileSystem():compaction_id_to_file_num_map(256)
+{
+  int queue_depth = 1024;
+  memset(&params, 0, sizeof(params));
+  int ring_fd = io_uring_setup(queue_depth, &params);
+  io_uring_queue_init_params(ring_fd, &ring_base, &params);
+}
 
 FileSystem::~FileSystem() = default;
 

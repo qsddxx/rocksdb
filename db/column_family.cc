@@ -22,6 +22,7 @@
 #include "db/compaction/compaction_picker_fifo.h"
 #include "db/compaction/compaction_picker_level.h"
 #include "db/compaction/compaction_picker_universal.h"
+#include "db/compaction/compaction_picker_segment.h"
 #include "db/db_impl/db_impl.h"
 #include "db/internal_stats.h"
 #include "db/job_context.h"
@@ -588,6 +589,13 @@ std::vector<std::string> ColumnFamilyData::GetDbPaths() const {
 const uint32_t ColumnFamilyData::kDummyColumnFamilyDataId =
     std::numeric_limits<uint32_t>::max();
 
+/*folly::AtomicHashMap<uint64_t, int>::Config MakeConfig() {  
+  folly::AtomicHashMap<uint64_t, int>::Config config;  
+  config.emptyKey = 0;  
+  config.lockedKey = 1;  
+  config.erasedKey = 2;  
+  return config;  
+} */
 ColumnFamilyData::ColumnFamilyData(
     uint32_t id, const std::string& name, Version* _dummy_versions,
     Cache* _table_cache, WriteBufferManager* write_buffer_manager,
@@ -596,7 +604,8 @@ ColumnFamilyData::ColumnFamilyData(
     BlockCacheTracer* const block_cache_tracer,
     const std::shared_ptr<IOTracer>& io_tracer, const std::string& db_id,
     const std::string& db_session_id, bool read_only)
-    : id_(id),
+    : //compaction_id_to_file_num_map(1024,MakeConfig()),
+      id_(id),
       name_(name),
       dummy_versions_(_dummy_versions),
       current_(nullptr),
@@ -629,6 +638,15 @@ ColumnFamilyData::ColumnFamilyData(
       db_paths_registered_(false),
       mempurge_used_(false),
       next_epoch_number_(1) {
+/*
+  config.emptyKey = 0;
+  config.lockedKey = 1;
+  config.erasedKey = 2;
+  int queue_depth = 1024;
+  memset(&params, 0, sizeof(params));
+  int ring_fd = io_uring_setup(queue_depth, &params);
+  io_uring_queue_init_params(ring_fd, &ring, &params);
+  */
   if (id_ != kDummyColumnFamilyDataId) {
     // TODO(cc): RegisterDbPaths can be expensive, considering moving it
     // outside of this constructor which might be called with db mutex held.
@@ -678,6 +696,10 @@ ColumnFamilyData::ColumnFamilyData(
                      "Column family %s does not use any background compaction. "
                      "Compactions can only be done via CompactFiles\n",
                      GetName().c_str());
+    }
+    else if (ioptions_.compaction_style==kCompactionStyleSegment){
+      compaction_picker_.reset(
+        new SegmentCompactionPicker(ioptions_,&internal_comparator_));
     } else {
       ROCKS_LOG_ERROR(ioptions_.logger,
                       "Unable to recognize the specified compaction style %d. "

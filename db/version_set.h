@@ -19,6 +19,9 @@
 // synchronization on all accesses.
 
 #pragma once
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include <atomic>
 #include <deque>
 #include <limits>
@@ -142,6 +145,45 @@ class VersionStorageInfo {
   void operator=(const VersionStorageInfo&) = delete;
   ~VersionStorageInfo();
   std::vector<std::vector<Segment*>>* GetSegments(){return &segments_;}
+  std::vector<Segment*>* GetLevelSegments(int level){return &segments_[level];}
+  bool ShouldCompactLevel(const ImmutableOptions& ioptions_,const MutableCFOptions& options_, int level)
+  {
+    if(level==0)
+    {
+      int total=0;
+      for(auto &segment_:segments_[level])
+      {
+        total+=segment_->GetFileNum();
+        if(total>options_.level0_file_num_compaction_trigger)
+        {
+          return true;
+        }
+      }
+    }
+    else
+    {
+      uint64_t total;
+      uint64_t target_file_size=options_.max_bytes_for_level_base*(std::pow(options_.max_bytes_for_level_multiplier,level));
+      for(auto &segment_:segments_[level])
+      {
+        total+=segment_->GetFileSize();
+        if(total>=target_file_size)
+        {
+          return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  }
+  int GetSegmentLevel()
+  {
+    return num_segment_levels_;
+  }
+  bool JudgeSegment(int i)
+  {
+    return segment_locations_.find(i)==segment_locations_.end()?false:true;
+  }
   void Reserve(int level, size_t size) { files_[level].reserve(size); }
   void ReserveForSegments(int level, size_t size)
   { 
@@ -211,12 +253,12 @@ class VersionStorageInfo {
       segments_.emplace_back(std::vector<Segment*>());
       num_segments_level_++;
     }
-    segments->MakeActualDelete(cmp);
     if(!segments->IsEmpty())
     {
         segments_[level].emplace_back(segments);
     }
   }
+  //无用
   void AddSegmentsAndMerge(int level,Segment* new_segment,const InternalKeyComparator* cmp)
   {
     if (level >= int(segments_.size()))
@@ -328,6 +370,29 @@ class VersionStorageInfo {
       }
     }
   }
+  void GenerateFileToSegmentIndex()
+  {
+    for (int level = 0; level < num_levels_; ++level)
+    {
+      for (size_t pos = 0; pos < segments_[level].size(); ++pos)
+      {
+        int num=segments_[level][pos]->GetSegmentNum();
+        std::vector<std::vector<FileMetaData*>> filelist=segments_[level][pos]->get_files();
+        for(auto& level_file:filelist)
+        {
+          for(auto&f:level_file)
+          {
+            file_to_segment.emplace(f->fd.GetNumber(),num);
+          }
+        }
+      }
+    }
+  }
+  int GetFileInWhichSegment(uint64_t f_num)
+  {
+    return file_to_segment[f_num];
+  }
+  //无用
   void AddFileForSegments(int level,std::vector<FileMetaData*> added_files,const InternalKeyComparator* cmp)
   {
     if(level>=int(segments_.size()))
@@ -413,6 +478,8 @@ class VersionStorageInfo {
   // We use compaction scores to figure out which compaction to do next
   // REQUIRES: db_mutex held!!
   // TODO find a better way to pass compaction_options_fifo.
+  void ComputeCompactionScore_Segment(const ImmutableOptions& immutable_options,
+                              const MutableCFOptions& mutable_cf_options);
   void ComputeCompactionScore(const ImmutableOptions& immutable_options,
                               const MutableCFOptions& mutable_cf_options);
 
@@ -472,6 +539,8 @@ class VersionStorageInfo {
 
   // Return idx'th highest score
   double CompactionScore(int idx) const { return compaction_score_[idx]; }
+  int CompactionSegmentNum() const {return static_cast<int>(compaction_score_.size());}
+  std::pair<int,int> CompactionSegmentScore(int level,int idx) const {return compaction_segment_[level][idx];}
 
   void GetOverlappingInputs(
       int level, const InternalKey* begin,  // nullptr means before all keys
@@ -548,6 +617,11 @@ class VersionStorageInfo {
   const std::vector<Segment*>& LevelSegments(int level) const {
     return segments_[level];
   }
+  Segment* GetSegment(int segment_num_)
+  {
+    FileLocation position=GetSegmentLocation(segment_num_);
+    return segments_[position.GetLevel()][position.GetPosition()];
+  }
   bool HasMissingEpochNumber() const;
   uint64_t GetMaxEpochNumberOfFiles() const;
   EpochNumberRequirement GetEpochNumberRequirement() const {
@@ -607,7 +681,6 @@ class VersionStorageInfo {
 
     return it->second;
   }
-   
   FileLocation GetSegmentLocation(uint64_t segment_number)
   {
     const auto it = segment_locations_.find(segment_number);
@@ -896,12 +969,13 @@ class VersionStorageInfo {
       for(auto& s:segments_[i])
       {
         auto filelist=s->get_files();
-        if(int(filelist.size())>level_per_segment_level)
+        int num=s->GetNotEmptyLevel();
+        if(num>level_per_segment_level)
         {
           std::cerr<<"The level "<<i<<" has segment which has levels more than "<<level_per_segment_level<<std::endl;
           exit(0);
         }
-        for(int j=0;j<int(filelist.size());j++)
+        for(int j=0;j<num;j++)
         {
           for(auto& f:filelist[j])
           {
@@ -993,6 +1067,10 @@ class VersionStorageInfo {
   {
     num_segments_level_=int(segments_.size());
   }
+  int NumSegmentLevel()
+  {
+    return num_segments_level_;
+  }
  private:
   void ComputeCompensatedSizes();
   void UpdateNumNonEmptyLevels();
@@ -1012,6 +1090,7 @@ class VersionStorageInfo {
 
   const InternalKeyComparator* internal_comparator_;
   const Comparator* user_comparator_;
+  int num_segment_levels_;
   int num_levels_;            // Number of levels
   int num_segments_level_;
   int num_non_empty_levels_;  // Number of levels. Any level larger than it
@@ -1040,6 +1119,7 @@ class VersionStorageInfo {
   FileLocationInSegment file_location_in_segment;
   //using SegmentLocations=UnorderedMap<uint64_t,FileLocation>;
   SegmentLocations segment_locations_;
+  std::unordered_map<uint64_t,int> file_to_segment;
 
   // Vector of blob files in version sorted by blob file number.
   BlobFiles blob_files_;
@@ -1116,6 +1196,7 @@ class VersionStorageInfo {
   // These are used to pick the best compaction level
   std::vector<double> compaction_score_;
   std::vector<int> compaction_level_;
+  std::vector<std::vector<std::pair<int,int>>> compaction_segment_;
   int l0_delay_trigger_count_ = 0;  // Count used to trigger slow down and stop
                                     // for number of L0 files.
 
@@ -1568,6 +1649,10 @@ class VersionSet {
   {
     return next_segment_number_;
   }
+  std::atomic<uint64_t>& GetCompactionNumber()
+  {
+    return next_compaction_number_;
+  }
 
   virtual Status Close(FSDirectory* db_dir, InstrumentedMutex* mu);
 
@@ -1719,6 +1804,7 @@ class VersionSet {
 
   uint64_t current_next_file_number() const { return next_file_number_.load(); }
   uint64_t current_next_segment_number() const { return next_segment_number_.load(); }
+  uint64_t current_next_compaction_number() const { return next_compaction_number_.load(); }
 
 
   uint64_t min_log_number_to_keep() const {
@@ -1730,6 +1816,7 @@ class VersionSet {
   // Allocate and return a new file number
   uint64_t NewFileNumber() { return next_file_number_.fetch_add(1); }
   uint64_t NewSegmentNumber() { return next_segment_number_.fetch_add(1); }
+  uint64_t NewCompactionNumber() { return next_compaction_number_.fetch_add(1); }
 
   // Fetch And Add n new file number
   uint64_t FetchAddFileNumber(uint64_t n) {
@@ -1737,6 +1824,9 @@ class VersionSet {
   }
   uint64_t FetchAddSegmentNumber(uint64_t n) {
     return next_segment_number_.fetch_add(n);
+  }
+  uint64_t FetchAddCompactionNumber(uint64_t n) {
+    return next_compaction_number_.fetch_add(n);
   }
 
   // Return the last sequence number.
@@ -2035,6 +2125,7 @@ class VersionSet {
   const ImmutableDBOptions* const db_options_;
   std::atomic<uint64_t> next_file_number_;
   std::atomic<uint64_t> next_segment_number_;
+  std::atomic<uint64_t> next_compaction_number_;
   // Any WAL number smaller than this should be ignored during recovery,
   // and is qualified for being deleted.
   std::atomic<uint64_t> min_log_number_to_keep_ = {0};

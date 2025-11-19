@@ -142,6 +142,7 @@ class SubcompactionState;
 
 class CompactionJob {
  public:
+ uint64_t compaction_id=0;
   CompactionJob(int job_id, Compaction* compaction,
                 const ImmutableDBOptions& db_options,
                 const MutableDBOptions& mutable_db_options,
@@ -309,7 +310,7 @@ class CompactionJob {
                                     const Slice* comp_end_user_key);
   Status InstallCompactionResults(bool* compaction_released);
   Status OpenCompactionOutputFile(SubcompactionState* sub_compact,
-                                  CompactionOutputs& outputs);
+                                  CompactionOutputs& outputs,uint64_t compaction_id);
 
   void RecordDroppedKeys(const CompactionIterationStats& c_iter_stats,
                          CompactionJobStats* compaction_job_stats = nullptr);

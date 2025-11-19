@@ -8,7 +8,9 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #pragma once
-
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include <atomic>
 #include <string>
 #include <unordered_map>
@@ -30,6 +32,8 @@
 #include "util/cast_util.h"
 #include "util/hash_containers.h"
 #include "util/thread_local.h"
+#include <folly/AtomicHashMap.h>
+#include <liburing.h>
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -298,8 +302,23 @@ class ColumnFamilySet;
 class ColumnFamilyData {
  public:
   ~ColumnFamilyData();
+  /*
+  folly::AtomicHashMap<uint64_t,int>* GetCompactionIdToWriteNumMap()
+  {
+    return &compaction_id_to_file_num_map;
+  }
+  folly::AtomicHashMap<uint64_t, int>::Config config;  
+  folly::AtomicHashMap<uint64_t,int> compaction_id_to_file_num_map;
+  io_uring* GetRing()
+  {
+    return &ring;
+  }
+  struct io_uring ring;
+  struct io_uring_params params;
+  */
 
   // thread-safe
+
   uint32_t GetID() const { return id_; }
   // thread-safe
   const std::string& GetName() const { return name_; }

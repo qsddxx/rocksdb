@@ -1045,6 +1045,11 @@ class WritableFileWriterIOPriorityTest : public testing::Test {
       EXPECT_EQ(options.rate_limiter_priority, io_priority_);
       return IOStatus::OK();
     }
+    IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg)override{return IOStatus::OK();};
+  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg)override{return IOStatus::OK();};
     IOStatus PositionedAppend(
         const Slice& /* data */, uint64_t /* offset */,
         const IOOptions& options,

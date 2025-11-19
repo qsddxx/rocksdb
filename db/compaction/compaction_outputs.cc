@@ -407,7 +407,7 @@ Status CompactionOutputs::AddToOutput(
 
   assert(builder_ != nullptr);
   const Slice& value = c_iter.value();
-  s = current_output().validator.Add(key, value);
+  s = current_output().validator.Add(key, value);//数据校验
   if (!s.ok()) {
     return s;
   }

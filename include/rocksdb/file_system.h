@@ -35,10 +35,12 @@
 #include "rocksdb/options.h"
 #include "rocksdb/table.h"
 #include "rocksdb/thread_status.h"
-
+#include "liburing.h"
+#include <folly/concurrency/ConcurrentHashMap.h>
 namespace ROCKSDB_NAMESPACE {
 
 class FileLock;
+class AlignedBuffer;
 class FSDirectory;
 class FSRandomAccessFile;
 class FSRandomRWFile;
@@ -181,6 +183,7 @@ struct FileOptions : EnvOptions {
   // Embedded IOOptions to control the parameters for any IOs that need
   // to be issued for the file open/creation
   IOOptions io_options;
+  bool use_io_uring_writes=true;
 
   // EXPERIMENTAL
   // The feature is in development and is subject to change.
@@ -336,6 +339,19 @@ using IOHandleDeleter = std::function<void(void*)>;
 // including data loss, unreported corruption, deadlocks, and more.
 class FileSystem : public Customizable {
  public:
+  folly::ConcurrentHashMap<uint64_t,int>* GetCompactionIdToWriteNumMap()
+  {
+    return &compaction_id_to_file_num_map;
+  }
+  //folly::AtomicHashMap<uint64_t, int>::Config config;  
+  folly::ConcurrentHashMap<uint64_t,int> compaction_id_to_file_num_map;
+  io_uring* GetRing()
+  {
+    return &ring_base;
+  }
+  struct io_uring ring_base;
+  struct io_uring_params params;
+
   FileSystem();
 
   // No copying allowed
@@ -1081,12 +1097,13 @@ struct DataVerificationInfo {
   // checksum of the data being written.
   Slice checksum;
 };
-
+class AlignedBuffer;
 // A file abstraction for sequential writing.  The implementation
 // must provide buffering since callers may append small fragments
 // at a time to the file.
 class FSWritableFile {
  public:
+ uint64_t compaction_id=0;
   FSWritableFile()
       : last_preallocated_block_(0),
         preallocation_block_size_(0),
@@ -1111,6 +1128,11 @@ class FSWritableFile {
   // PositionedAppend, so the users cannot mix the two.
   virtual IOStatus Append(const Slice& data, const IOOptions& options,
                           IODebugContext* dbg) = 0;
+  virtual IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg){return IOStatus::OK();};
+  virtual IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg){return IOStatus::OK();};
 
   // Append data with verification information.
   // Note that this API change is experimental and it might be changed in
@@ -1836,6 +1858,17 @@ class FSWritableFileWrapper : public FSWritableFile {
                   IODebugContext* dbg) override {
     return target_->Append(data, options, verification_info, dbg);
   }
+  virtual IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg) override
+                          {
+                            return target_->Append(async_buf,options,dbg);
+                          }
+  virtual IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,IODebugContext* dbg)
+                            {
+                              return target_->PositionedAppend(async_buf,offset,options,dbg);
+                            }
+
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& options,
                             IODebugContext* dbg) override {
@@ -1916,7 +1949,7 @@ class FSWritableFileWrapper : public FSWritableFile {
     return target_->Allocate(offset, len, options, dbg);
   }
 
- private:
+ public:
   FSWritableFile* target_;
 };
 
@@ -1927,7 +1960,7 @@ class FSWritableFileOwnerWrapper : public FSWritableFileWrapper {
   explicit FSWritableFileOwnerWrapper(std::unique_ptr<FSWritableFile>&& t)
       : FSWritableFileWrapper(t.get()), guard_(std::move(t)) {}
 
- private:
+ public:
   std::unique_ptr<FSWritableFile> guard_;
 };
 

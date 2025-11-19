@@ -47,6 +47,7 @@ struct CompactionInputFiles;
 // compaction style specific logic for them.
 class CompactionPicker {
  public:
+ 
   CompactionPicker(const ImmutableOptions& ioptions,
                    const InternalKeyComparator* icmp);
   virtual ~CompactionPicker();
@@ -151,9 +152,13 @@ class CompactionPicker {
 
   // Return true if the passed key range overlap with a compaction output
   // that is currently running.
-  bool RangeOverlapWithCompaction(const Slice& smallest_user_key,
+  virtual bool RangeOverlapWithCompaction(const Slice& smallest_user_key,
                                   const Slice& largest_user_key,
                                   int level) const;
+  bool RangeOverlapWithCompaction_Segment(const Slice& smallest_user_key,
+                                  const Slice& largest_user_key,
+                                  int level) const;
+
 
   // Stores the minimal range that covers all entries in inputs in
   // *smallest, *largest.
@@ -199,7 +204,10 @@ class CompactionPicker {
 
   // Returns true if the key range that `inputs` files cover overlap with the
   // key range of a currently running compaction.
-  bool FilesRangeOverlapWithCompaction(
+  bool FilesRangeOverlapWithCompaction_Segment(
+      const std::vector<CompactionInputFiles>& inputs, int level,
+      int proximal_level) const;
+  virtual bool FilesRangeOverlapWithCompaction(
       const std::vector<CompactionInputFiles>& inputs, int level,
       int proximal_level) const;
 
@@ -227,8 +235,8 @@ class CompactionPicker {
                              int output_level, int* parent_index);
 
   // Register this compaction in the set of running compactions
-  void RegisterCompaction(Compaction* c);
-
+  virtual void RegisterCompaction(Compaction* c);
+  void RegisterCompaction_Segment(Compaction* c);
   // Remove this compaction from the set of running compactions
   void UnregisterCompaction(Compaction* c);
 
@@ -240,8 +248,19 @@ class CompactionPicker {
   }
 
   const InternalKeyComparator* icmp() const { return icmp_; }
+  
+  uint64_t FetchAddCompactionNumber(uint64_t n) {
+      return next_compaction_number_.fetch_add(n);
+  }
+  uint64_t NewCompactionNumber() { return next_compaction_number_.fetch_add(1); }
+  uint64_t current_next_compaction_number() const { return next_compaction_number_.load(); }
+  std::atomic<uint64_t>& GetCompactionNumber()
+  {
+    return next_compaction_number_;
+  }
 
  protected:
+  std::atomic<uint64_t> next_compaction_number_;
   const ImmutableOptions& ioptions_;
 
   // A helper function to SanitizeAndConvertCompactionInputFiles() that
@@ -257,6 +276,7 @@ class CompactionPicker {
   // Keeps track of all compactions that are running.
   // Protected by DB mutex
   std::unordered_set<Compaction*> compactions_in_progress_;
+  //std::vector<std::unordered_set<Compaction*>> segment_compaction_in_progress_;
 
   const InternalKeyComparator* const icmp_;
 };

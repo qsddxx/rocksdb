@@ -591,6 +591,11 @@ bool Compaction::IsTrivialMove() const {
       (cfd_->ioptions().compaction_style == kCompactionStyleUniversal)) {
     return is_trivial_move_;
   }
+  if ((mutable_cf_options_.compaction_options_universal.allow_trivial_move) &&
+      (output_level_ != 0) &&
+      (cfd_->ioptions().compaction_style == kCompactionStyleSegment)) {
+    return is_trivial_move_;
+  }
 
   if (!(start_level_ != output_level_ && num_input_levels() == 1 &&
         input(0, 0)->fd.GetPathId() == output_path_id() &&
@@ -631,10 +636,14 @@ bool Compaction::IsTrivialMove() const {
 }
 
 void Compaction::AddInputDeletions(VersionEdit* out_edit) {
-  for (size_t which = 0; which < num_input_levels(); which++) {
+ for (size_t which = 0; which < num_input_levels(); which++) {
     for (size_t i = 0; i < inputs_[which].size(); i++) {
-      out_edit->DeleteFile(level(which), inputs_[which][i]->fd.GetNumber());
+     out_edit->DeleteFile(level(which), inputs_[which][i]->fd.GetNumber());
     }
+  }
+  for(int i=0;i<static_cast<int>(segment_number.size());i++)
+  {
+    out_edit->DeleteSegment(segment_level,*input_vstorage_->GetSegment(segment_number[i]));
   }
 }
 
@@ -772,6 +781,11 @@ uint64_t Compaction::CalculateTotalInputSize() const {
 
 void Compaction::ReleaseCompactionFiles(const Status& status) {
   MarkFilesBeingCompacted(false);
+  for(auto num:segment_number)
+  {
+    Segment* segment_=input_vstorage_->GetSegment(num);
+    segment_->being_compacted=false;
+  }
   cfd_->compaction_picker()->ReleaseCompactionFiles(this, status);
 }
 

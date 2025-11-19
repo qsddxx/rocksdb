@@ -1138,7 +1138,7 @@ void Segment::GetNotDeletedFiles(std::vector<FileMetaData*>& not_deleted_files)c
         key_range.emplace_back(files_[i][0]->smallest,files_[i].back()->largest);
       }
     }
-    for(int j=0;i<level;j++)
+    for(int j=0;j<level;j++)
     {
       key_range[j].first=files_[j][0]->smallest;
       key_range[j].second=files_[j].back()->largest;
@@ -1195,27 +1195,28 @@ void Segment::GetNotDeletedFiles(std::vector<FileMetaData*>& not_deleted_files)c
   int Segment::HasOverlapWithLevel(int lvl, const FileMetaData* file, const InternalKeyComparator* cmp)
   {
     auto& level_files = files_[lvl];
+    
     if (level_files.empty())
     {
-      InsertFileInLevel(level,file,files_[level].begin(),cmp);
+      //InsertFileInLevel(level,file,files_[level].begin(),cmp);
       return level;
     }
     const auto& range = key_range[lvl];
     if (cmp->Compare(file->largest, range.first) < 0)
     {
-      InsertFileInLevel(level,file,files_[level].begin(),cmp);
+      //InsertFileInLevel(level,file,files_[level].begin(),cmp);
         return level;
     }
     if(cmp->Compare(file->smallest, range.second) > 0)
     {
-      InsertFileInLevel(level,file,files_[level].end(),cmp);
+      //InsertFileInLevel(level,file,files_[level].end(),cmp);
         return level;
     }
     auto it = std::lower_bound(level_files.begin(), level_files.end(), file,
         [cmp](const FileMetaData* a, const FileMetaData* b) {
             return cmp->Compare(a->smallest, b->smallest) < 0;
         });
-    if (it != level_files.end())
+    if (it != level_files.begin())
     {
         if (Overlaps(*it, file, cmp))
         {
@@ -1230,7 +1231,7 @@ void Segment::GetNotDeletedFiles(std::vector<FileMetaData*>& not_deleted_files)c
             }
         }
     }
-    if (it == level_files.end())
+    if (it == level_files.begin())
     {
         FileMetaData* last = level_files.back();
         if (Overlaps(last, file, cmp))
@@ -1238,7 +1239,7 @@ void Segment::GetNotDeletedFiles(std::vector<FileMetaData*>& not_deleted_files)c
           return -1;
         }
     }
-    InsertFileInLevel(level,file,it,cmp);
+    //InsertFileInLevel(level,file,it,cmp);
     
     return level;
 }
@@ -1612,16 +1613,18 @@ void Segment::MakeActualDelete(const InternalKeyComparator* cmp)
     }
     return return_vector;
   }
-  int Segment::AddFile(const FileMetaData* added_file,const InternalKeyComparator* cmp)
+  int Segment::AddFile(const FileMetaData* added_file,const InternalKeyComparator* cmp,int largest_level)
   {
-    for (int lvl = 0; lvl < level; ++lvl)
+    for (int lvl = level-1; lvl >=largest_level+1; --lvl)
     {
         int p=HasOverlapWithLevel(lvl, added_file, cmp);
-        if (p!=-1)
+        if (p==-1)
         {
-            return p;
+            return p+1;
         }
     }
+    return 0;
+    /*
     files_.emplace_back(std::vector<FileMetaData*>());
     files_.back().emplace_back(const_cast<FileMetaData*>(added_file));
     key_range.emplace_back(added_file->smallest, added_file->largest);
@@ -1638,6 +1641,7 @@ void Segment::MakeActualDelete(const InternalKeyComparator* cmp)
     level++;
     file_number++;
     return level;
+    */
   }
   void Segment::RebuildFileLocation()
     {
@@ -1653,72 +1657,77 @@ void Segment::MakeActualDelete(const InternalKeyComparator* cmp)
         }
       }
     }
-     Segment::Segment(FileMetaData* file,const Comparator* ucmp)
-         :smallest(file->smallest),
-          largest(file->largest),
-          file_indexer_(ucmp),
-          level(1),
-          file_number(1),
-          deleted_file_num(1),
-          //segment_is_changed(false),
-          has_empty_level(false){
-        files_.emplace_back(std::vector<FileMetaData*>());
-        files_[0].push_back(file);
-        key_range.emplace_back(file->smallest, file->largest);
-        RebuildFileLocation();
-    }
+    Segment::Segment(FileMetaData* file, const Comparator* ucmp)
+    : smallest(file->smallest)
+    , largest(file->largest)
+    , level_files_brief_()
+    , file_indexer_(ucmp)
+    , being_compacted(false)
+    , refs(1)
+    // new 新 vector，解引用后绑定给 files_（引用必须初始化）
+    , files_(*new std::vector<std::vector<FileMetaData*>>())
+    , key_range()
+    , file_location()
+    , deleted_file_location()
+    , deleted_key_range()
+    , arena_()
+    , level(1)
+    , segment_num_(0)
+    , file_number(1)
+    , deleted_file_num(1)
+    , has_empty_level(false)
+    , not_empty_level(0)
+{
+    // 第零行：先添加一个空的子 vector，再插入 file
+    files_.emplace_back(std::vector<FileMetaData*>());  // 第零行（索引 0）
+    files_[0].push_back(file);  // 往第零行插入文件
+    key_range.emplace_back(file->smallest, file->largest);
+    RebuildFileLocation();
+}
     Segment::Segment(const Segment& other)
-        :smallest(other.smallest),
-          largest(other.largest),
-          level_files_brief_(other.level_files_brief_),
-          file_indexer_(other.file_indexer_),
-          key_range(other.key_range),
-          deleted_file_location(other.deleted_file_location),
-          deleted_key_range(other.deleted_key_range),
-          level(other.level),
-          segment_num_(other.segment_num_),
-          file_number(other.file_number),
-          //segment_is_changed(other.segment_is_changed),
-          has_empty_level(other.has_empty_level) {
-        files_.resize(other.files_.size());
-        for (size_t i = 0; i < other.files_.size(); i++) {
-            files_[i].resize(other.files_[i].size());
-            for (size_t j = 0; j < other.files_[i].size(); j++) {
-                files_[i][j] = other.files_[i][j];
-            }
-        }
-        for (size_t i = 0; i < files_.size(); i++) {
-            for (size_t j = 0; j < files_[i].size(); j++) {
-                file_location[files_[i][j]->fd.GetNumber()] = {static_cast<int>(i), static_cast<int>(j)};
-            }
-        }
-    }
-    Segment::Segment(const Segment& other,const Comparator* cmp) 
-        :smallest(other.smallest),
-          largest(other.largest),
-          level_files_brief_(other.level_files_brief_),
-          file_indexer_(cmp),
-          key_range(other.key_range),
-          deleted_file_location(other.deleted_file_location),
-          deleted_key_range(other.deleted_key_range),
-          level(other.level),
-          segment_num_(other.segment_num_),
-          file_number(other.file_number),
-          //(other.segment_is_changed),
-          has_empty_level(other.has_empty_level) {
-        files_.resize(other.files_.size());
-        for (size_t i = 0; i < other.files_.size(); i++) {
-            files_[i].resize(other.files_[i].size());
-            for (size_t j = 0; j < other.files_[i].size(); j++) {
-                files_[i][j] = other.files_[i][j];
-            }
-        }
-        for (size_t i = 0; i < files_.size(); i++) {
-            for (size_t j = 0; j < files_[i].size(); j++) {
-                file_location[files_[i][j]->fd.GetNumber()] = {static_cast<int>(i), static_cast<int>(j)};
-            }
-        }
-    }
+    : smallest(other.smallest)
+    , largest(other.largest)
+    , level_files_brief_(other.level_files_brief_)
+    , file_indexer_(other.file_indexer_)
+    , being_compacted(other.being_compacted)
+    , files_(other.files_)  // 拷贝files_
+    , key_range(other.key_range)
+    , file_location(other.file_location)
+    , deleted_file_location(other.deleted_file_location)
+    , deleted_key_range(other.deleted_key_range)
+    , level(other.level)
+    , segment_num_(other.segment_num_)
+    , file_number(other.file_number)
+    , deleted_file_num(other.deleted_file_num)  // 补充原代码遗漏
+    , has_empty_level(other.has_empty_level)
+    , not_empty_level(other.not_empty_level)
+{
+  int a=other.refs;
+  refs=a;
+}
+
+// 第三个构造函数：拷贝构造（带比较器参数）
+Segment::Segment(const Segment& other, const Comparator* cmp)
+    : smallest(other.smallest)
+    , largest(other.largest)
+    , level_files_brief_(other.level_files_brief_)
+    , file_indexer_(cmp)  // 使用新的比较器
+    , being_compacted(other.being_compacted)
+    , files_(other.files_)  // 拷贝files_
+    , key_range(other.key_range)
+    , file_location(other.file_location)
+    , deleted_file_location(other.deleted_file_location)
+    , deleted_key_range(other.deleted_key_range)
+    , level(other.level)
+    , segment_num_(other.segment_num_)
+    , file_number(other.file_number)
+    , deleted_file_num(other.deleted_file_num)  // 补充原代码遗漏
+    , has_empty_level(other.has_empty_level)
+    , not_empty_level(other.not_empty_level)
+{
+    int a=other.refs;
+    refs=a;
+}
 void DoGenerateLevelFilesBrief(LevelFilesBrief* file_level,
                                const std::vector<FileMetaData*>& files,
                                Arena* arena) {

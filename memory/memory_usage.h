@@ -4,7 +4,9 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
-
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include <cstddef>
 #include <unordered_map>
 #ifdef USE_FOLLY

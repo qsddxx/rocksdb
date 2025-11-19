@@ -310,7 +310,11 @@ class FSWritableFileTracingWrapper : public FSWritableFileOwnerWrapper {
                   IODebugContext* dbg) override {
     return Append(data, options, dbg);
   }
-
+  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg)override{return target()->Append(async_buf,options,dbg);};
+  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg)override{return target()->PositionedAppend(async_buf,offset,options,dbg);};
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& options,
                             IODebugContext* dbg) override;
@@ -377,7 +381,7 @@ class FSWritableFilePtr {
     io_tracer_ = nullptr;
   }
 
- private:
+ public:
   std::shared_ptr<IOTracer> io_tracer_;
   std::unique_ptr<FSWritableFileTracingWrapper> fs_tracer_;
 };

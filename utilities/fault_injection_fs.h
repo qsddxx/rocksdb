@@ -73,6 +73,11 @@ class TestFSWritableFile : public FSWritableFile {
                   IODebugContext* dbg) override;
   IOStatus Truncate(uint64_t size, const IOOptions& options,
                     IODebugContext* dbg) override;
+  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg)override{return IOStatus::OK();};
+  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg)override{return IOStatus::OK();};
   IOStatus Close(const IOOptions& options, IODebugContext* dbg) override;
   IOStatus Flush(const IOOptions&, IODebugContext*) override;
   IOStatus Sync(const IOOptions& options, IODebugContext* dbg) override;

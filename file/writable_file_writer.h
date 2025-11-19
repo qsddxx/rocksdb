@@ -138,6 +138,7 @@ class WritableFileWriter {
                                         char* buf);
 
   std::string file_name_;
+  public:
   FSWritableFilePtr writable_file_;
   SystemClock* clock_;
   AlignedBuffer buf_;
@@ -169,6 +170,7 @@ class WritableFileWriter {
   Temperature temperature_;
 
  public:
+  IOStatus WriteAsyncWithIOUring(const IOOptions& opts);
   WritableFileWriter(
       std::unique_ptr<FSWritableFile>&& file, const std::string& _file_name,
       const FileOptions& options, SystemClock* clock = nullptr,

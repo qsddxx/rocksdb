@@ -75,7 +75,7 @@ Status BuildTable(
     Env::WriteLifeTimeHint write_hint, const std::string* full_history_ts_low,
     BlobFileCompletionCallback* blob_callback, Version* version,
     uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes,
-    InternalStats::CompactionStats* flush_stats) {
+    InternalStats::CompactionStats* flush_stats,uint64_t compaction_id) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -148,6 +148,7 @@ Status BuildTable(
       FileOptions fo_copy = file_options;
       fo_copy.write_hint = write_hint;
       IOStatus io_s = NewWritableFile(fs, fname, &file, fo_copy);
+      file->compaction_id=compaction_id;
       assert(s.ok());
       s = io_s;
       if (io_status->ok()) {

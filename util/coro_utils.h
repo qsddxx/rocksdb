@@ -5,6 +5,9 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #if defined(USE_COROUTINES)
+#ifndef FOLLY_F14_INTRINSICS_MODE
+#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
+#endif
 #include "folly/coro/Coroutine.h"
 #include "folly/coro/Task.h"
 #endif

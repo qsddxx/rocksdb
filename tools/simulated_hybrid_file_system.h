@@ -111,6 +111,11 @@ class SimulatedWritableFile : public FSWritableFileWrapper {
                             const IOOptions& options,
                             const DataVerificationInfo& verification_info,
                             IODebugContext* dbg) override;
+  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
+                          IODebugContext* dbg)override{return target()->Append(async_buf,options,dbg);};
+  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
+                            const IOOptions& options,
+                            IODebugContext* dbg)override{return target()->PositionedAppend(async_buf,offset,options,dbg);};
 
  private:
   std::unique_ptr<FSWritableFile> file_guard_;

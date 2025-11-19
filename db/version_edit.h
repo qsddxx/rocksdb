@@ -14,6 +14,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
 
 #include "db/blob/blob_file_addition.h"
 #include "db/blob/blob_file_garbage.h"
@@ -487,8 +488,16 @@ class Segment
   {
     return files_;
   }
+  std::vector<std::vector<FileMetaData*>>& get_same_files()
+  {
+    return files_;
+  }
+  std::vector<std::vector<FileMetaData*>> get_files()
+  {
+    return files_;
+  }
 
-  int AddFile(const FileMetaData* added_file,const InternalKeyComparator* cmp);
+  int AddFile(const FileMetaData* added_file,const InternalKeyComparator* cmp,int largest_level=-1);
   void MakeActualDelete(const InternalKeyComparator* cmp);
   std::vector<std::pair<FileMetaData*,int>> MakeActualDeleteWithMiddleReturn(const InternalKeyComparator* cmp);
   std::vector<std::tuple<FileMetaData*,int,int>> MakeActualDeleteAndReturn(const InternalKeyComparator* cmp);
@@ -531,6 +540,22 @@ int GetLevel()
 {
   return level;
 }
+int GetNotEmptyLevel()
+{
+  return not_empty_level;
+}
+int GetFileNum()
+{
+  return file_number;
+}
+uint64_t GetFileSize()
+{
+  return file_size;
+}
+std::vector<FileMetaData*> GetLevelFiles(int i)
+{
+  return files_[i];
+}
   /*void UpdateSegmentIsChanged()const
   {
     segment_is_changed=true;
@@ -539,6 +564,53 @@ int GetLevel()
   Segment(const Segment& other);
   Segment(const Segment& other,const Comparator* cmp);
   explicit Segment(FileMetaData* file,const Comparator* ucmp);
+  Segment(std::vector<std::vector<FileMetaData*>>* filelist,const InternalKeyComparator* cmp):file_indexer_(cmp->user_comparator()),files_(*filelist)
+  {
+    file_size=0;
+    bool lable=true;
+    level=static_cast<int>(files_.size());
+    key_range.resize(level);
+    bool first=true;
+    for(int i=static_cast<int>(files_.size())-1;i>=0;i++)
+    {
+      if(!files_[i].empty()&&lable)
+      {
+        lable=false;
+        not_empty_level=i+1;
+      }
+      if(!files_[i].empty())
+      {
+        if(first)
+        {
+          first=false;
+          smallest=files_[i][0]->smallest;
+          largest=files_[i].back()->largest;
+          key_range[i].first=files_[i][0]->smallest;
+          key_range[i].second=files_[i].back()->largest;
+        }
+        else
+        {
+          smallest=cmp->Compare(files_[i][0]->smallest,smallest)<=0?files_[i][0]->smallest:smallest;
+          largest=cmp->Compare(files_[i].back()->largest,largest)>=0?files_[i].back()->largest:largest;
+          key_range[i].first=files_[i][0]->smallest;
+          key_range[i].second=files_[i].back()->largest;
+        }
+      }
+      file_number+=files_[i].size();
+      for(auto f:files_[i])
+      {
+        file_size+=f->fd.GetFileSize();
+      }
+    }
+    RebuildFileLocation();
+    for(int i=not_empty_level-1;i>=0;i++)
+    {
+      for(int j=0;j<static_cast<int>(files_[i].size());j++)
+      {
+        file_location.emplace(files_[i][j]->fd.GetNumber(),std::make_pair(i,j));
+      }
+    }
+  }
   int GetLevelNum()
   {
     return level;
@@ -547,8 +619,10 @@ int GetLevel()
   InternalKey largest;
   autovector<LevelFilesBrief> level_files_brief_;
   FileIndexer file_indexer_;
+  bool being_compacted=false;
+  std::atomic<int> refs=0;
   private:
-  std::vector<std::vector<FileMetaData*>> files_;
+  std::vector<std::vector<FileMetaData*>>& files_;
   std::vector<std::pair<InternalKey,InternalKey>> key_range;
   std::unordered_map<uint64_t,std::pair<int,int>> file_location;
   mutable std::vector<std::pair<int,int>> deleted_file_location;
@@ -556,10 +630,14 @@ int GetLevel()
   Arena arena_;
   int level;
   uint64_t segment_num_;
+  public:
   int file_number;
   mutable int deleted_file_num;
   //mutable bool segment_is_changed;
   mutable bool has_empty_level;
+  int not_empty_level=0;
+  uint64_t file_size;
+  //int file_num=0;
   //mutable std::vector<std::tuple<FileMetaData*,int,int>> children_segment_file_list;
   //mutable std::vector<std::tuple<FileMetaData*,int,int>> single_added_file_list;
 };
@@ -666,21 +744,21 @@ class VersionEdit {
   void DeleteFile(int level, uint64_t file) {
     deleted_files_.emplace(level, file);
     map_for_judge.emplace(file);
-    deleted_files_for_judge.emplace(level,file);
+    //deleted_files_for_judge.emplace(level,file);
   }
-  void DeleteSegment(int level,Segment& s)
+  void DeleteSegment(int level,Segment s)
   {
     deleted_segments_.emplace_back(level,s);
-     for(auto files:s.get_files())
-    {
-      for(auto f:files)
-      {
-        if(map_for_judge.find(f->fd.GetNumber())==map_for_judge.end())
-        {
-          deleted_files_.emplace(level, f->fd.GetNumber());
-        }
-      }
-    }
+    //for(auto files:s.get_files())
+    //{
+      //for(auto f:files)
+      //{
+        //if(map_for_judge.find(f->fd.GetNumber())==map_for_judge.end())
+        //{
+          //deleted_files_.emplace(level, f->fd.GetNumber());
+        //}
+      //}
+    //}
   }
 
   // Retrieve the table files deleted as well as their associated levels.
@@ -773,6 +851,8 @@ class VersionEdit {
   using NewFiles = std::vector<std::pair<int, FileMetaData>>;
   using NewSegments=std::vector<std::pair<int,Segment>>;
   const NewFiles& GetNewFiles() const { return new_files_; }
+  const std::vector<int> GetCompactionAddedFiles() const {return compaction_added_files_;}
+  void AddCompactionAddedFiles(int number){compaction_added_files_.emplace_back(number);}
 
   NewFiles& GetMutableNewFiles() { return new_files_; }
   const NewFiles& GetNewFilesForJudge() const { return new_files_for_judge; }
@@ -1002,6 +1082,7 @@ class VersionEdit {
   DeletedFiles deleted_files_for_judge;
   NewFiles new_files_;
   NewFiles new_files_for_judge;
+  std::vector<int> compaction_added_files_;
   DeletedSegments deleted_segments_;
   ChangedSegments changed_segments_;
   std::unordered_set<int> map_for_judge;
