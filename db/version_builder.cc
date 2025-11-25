@@ -2266,6 +2266,7 @@ std::vector<std::vector<std::vector<FileMetaData*>>*> AddFileForSegment(VersionS
     }
     for(int i=beginner;i<=upper;i++)
     {
+      should_remove=false;
       middle_new_filelist.clear();
       while(not_empty_level[i])
       {
@@ -2379,31 +2380,31 @@ std::vector<std::vector<std::vector<FileMetaData*>>*> AddFileForSegment(VersionS
                     has_overlaped=true;
                   }
                 }
-                if(has_overlaped)
+                else
                 {
-                  if(should_remove)
+                  if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it3-1))->smallest.Encode()),ExtractUserKey(target.Encode()))<=0)
                   {
-                    segment_iterator_list[i].first++;
-                    break;
-                  }
-                  else
-                  {
-                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0)
+                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it3-1))->largest.Encode()),ExtractUserKey(target1.Encode()))>=0)
                     {
-                      do
-                      {
-                        if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
-                        {
-                          break;
-                        }
-                        ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
-                        (*final_segment_filelist)[0].emplace_back(*it3);
-                        (*newfile_iterator_list[i].first)->refs++;
-                        it3++;
-                        newfile_iterator_list[0].first++;
-                      }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
+                      has_overlaped=true;
                     }
                   }
+                }
+                if(has_overlaped)
+                {
+                  segment_iterator_list[i].first++;
+                  do
+                  {
+                    if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
+                    {
+                      break;
+                    }
+                    ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
+                    (*final_segment_filelist)[0].emplace_back(*it3);
+                    (*newfile_iterator_list[i].first)->refs++;
+                    it3++;
+                    newfile_iterator_list[0].first++;
+                  }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
                 }
                 else
                 {
@@ -2489,31 +2490,31 @@ std::vector<std::vector<std::vector<FileMetaData*>>*> AddFileForSegment(VersionS
                     has_overlaped=true;
                   }
                 }
-                if(has_overlaped)
+                else
                 {
-                  if(should_remove)
+                  if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it3-1))->smallest.Encode()),ExtractUserKey(target.Encode()))<=0)
                   {
-                    segment_iterator_list[i].first++;
-                    break;
-                  }
-                  else
-                  {
-                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0)
+                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it3-1))->largest.Encode()),ExtractUserKey(target1.Encode()))>=0)
                     {
-                      do
-                      {
-                        if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
-                        {
-                          break;
-                        }
-                        ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
-                        (*final_segment_filelist)[0].emplace_back(*it3);
-                        (*newfile_iterator_list[i].first)->refs++;
-                        it3++;
-                        newfile_iterator_list[0].first++;
-                      }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
+                      has_overlaped=true;
                     }
                   }
+                }
+                if(has_overlaped)
+                {
+                  segment_iterator_list[i].first++;
+                  do
+                  {
+                    if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
+                    {
+                      break;
+                    }
+                    ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
+                    (*final_segment_filelist)[0].emplace_back(*it3);
+                    (*newfile_iterator_list[i].first)->refs++;
+                    it3++;
+                    newfile_iterator_list[0].first++;
+                  }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
                 }
                 else
                 {
@@ -2910,7 +2911,7 @@ int HasOverlapWithLevel(int segment_level,int lvl, const FileMetaData* file, con
         });
     if (it != level_files.begin())
     {
-        if (!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it--))->smallest.Encode()),ExtractUserKey(file->smallest.Encode()))>=0))
+        if (!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it--))->largest.Encode()),ExtractUserKey(file->smallest.Encode()))>=0))
         {
           return -1;
         }
@@ -2941,7 +2942,7 @@ int GetL0InputLevel(std::vector<std::vector<FileMetaData*>>& filelist,std::vecto
     {
       actual_level=largest_level;
     }
-    int lvl=level-1;
+    int lvl=level;
     if(lvl<=actual_level)
     {
       levels_[level_per_segment_level-actual_level-2].final_added_files.emplace_back(file);
@@ -2984,7 +2985,7 @@ int GetInputLevel(std::vector<std::vector<FileMetaData*>>& filelist,std::vector<
       levels_[(segment_level+1)*level_per_segment_level-1].final_added_files.emplace_back(file);
       continue;
     }
-    int lvl=level-1;
+    int lvl=level;
     for (; lvl >=0; --lvl)
     {
         int p=HasOverlapWithLevel(0,lvl, file, cmp,filelist);
