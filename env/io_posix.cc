@@ -1997,10 +1997,12 @@ IOStatus AsyncPosixWritableFile::Close(const IOOptions& opts, IODebugContext* db
     }
 #endif
   }
+  /*
   if (close(fd_) < 0) {
     s = IOError("While closing file after writing", filename_, errno);
   }
   fd_ = -1;
+  */
   return s;
 }
 
