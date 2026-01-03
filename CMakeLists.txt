@@ -94,9 +94,6 @@ option(WITH_LZ4 "build with lz4" OFF)
 option(WITH_ZLIB "build with zlib" OFF)
 option(WITH_ZSTD "build with zstd" OFF)
 option(WITH_WINDOWS_UTF8_FILENAMES "use UTF8 as characterset for opening files, regardles of the system code page" OFF)
-set(USE_FOLLY ON CACHE BOOL "build with Folly" FORCE)
-set(USE_FOLLY_LITE OFF CACHE BOOL "build with Folly lite" FORCE)
-set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "Disable shared libs when using Folly" FORCE)
 if (WITH_WINDOWS_UTF8_FILENAMES)
   add_definitions(-DROCKSDB_WINDOWS_UTF8_FILENAMES)
 endif()
@@ -107,7 +104,6 @@ if( NOT DEFINED CMAKE_CXX_STANDARD )
 endif()
 
 include(CMakeDependentOption)
-add_definitions(-DFOLLY_F14_INTRINSICS_MODE=1)
 if(MSVC)
   option(WITH_GFLAGS "build with GFlags" OFF)
   option(WITH_XPRESS "build with windows built in compression" OFF)
@@ -607,32 +603,7 @@ if(USE_FOLLY)
   endif()
   set(ROCKSDB_BUILD_SHARED OFF)
   set(GFLAGS_SHARED FALSE)
-
-  find_package(gflags CONFIG REQUIRED)
-  include("/usr/local/lib/cmake/gflags/gflags-nonamespace-targets.cmake")
-  if(TARGET gflags::gflags_shared)
-    message(STATUS "✅ 找到 gflags::gflags_shared 目标")
-  else()
-    message(FATAL_ERROR "❌ 仍未找到 gflags::gflags_shared 目标")
-  endif()
-  if(TARGET gflags_shared)
-  message(STATUS "✅ 找到非命名空间目标 gflags_shared")
-  else()
-    message(FATAL_ERROR "❌ 仍未找到 gflags_shared，请检查路径是否正确")
-  endif()
-  set_target_properties(gflags::gflags_shared PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
-  set_target_properties(gflags_shared PROPERTIES MAP_IMPORTED_CONFIG_DEBUG Release)
   find_package(folly)
-  if(TARGET Folly::folly)
-    message(STATUS "✅ 找到 CMake 目标：Folly::folly")
-  else()
-    message(STATUS "❌ 未找到 CMake 目标：Folly::folly")
-  endif()
-  if(TARGET Folly::folly_deps)
-    message(STATUS "✅ 找到 CMake 目标：Folly::folly_deps")
-  else()
-    message(STATUS "❌ 未找到 CMake 目标：Folly::folly_deps")
-  endif()
   # If cmake could not find the folly-config.cmake file, fall back
   # to looking in third-party/folly for folly and its dependencies
   if(NOT FOLLY_LIBRARIES)
@@ -655,19 +626,6 @@ if(USE_FOLLY)
 
     exec_program(sed ARGS -i 's/gflags_shared//g'
     ${FOLLY_INST_PATH}/lib/cmake/folly/folly-targets.cmake)
-    if(EXISTS ${FOLLY_TARGETS_FILE})
-      execute_process(
-        COMMAND sed -i.bak "s/gflags_shared//g" ${FOLLY_TARGETS_FILE}
-        RESULT_VARIABLE SED_RESULT
-      )
-      if(NOT SED_RESULT EQUAL 0)
-        message(WARNING "Failed to remove gflags_shared from ${FOLLY_TARGETS_FILE}, may cause link errors")
-      else()
-        message(STATUS "Successfully removed gflags_shared from ${FOLLY_TARGETS_FILE}")
-      endif()
-    else()
-      message(FATAL_ERROR "folly-targets.cmake not found at ${FOLLY_TARGETS_FILE}")
-    endif()
 
     include(${FOLLY_INST_PATH}/lib/cmake/folly/folly-config.cmake)
   endif()
@@ -797,7 +755,6 @@ set(SOURCES
         env/file_system_tracer.cc
         env/fs_on_demand.cc
         env/fs_remap.cc
-        env/io_async.cc
         env/mock_env.cc
         env/unique_id_gen.cc
         file/delete_scheduler.cc
@@ -1195,8 +1152,6 @@ target_include_directories(${ROCKSDB_STATIC_LIB} PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
 target_link_libraries(${ROCKSDB_STATIC_LIB} PRIVATE
   ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
-target_link_libraries(rocksdb PUBLIC Folly::folly Folly::folly_deps)
-target_link_libraries(${ROCKSDB_STATIC_LIB} PUBLIC Folly::folly Folly::folly_deps)
 
 if(ROCKSDB_BUILD_SHARED)
   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES} ${BUILD_VERSION_CC})
@@ -1574,10 +1529,6 @@ if(WITH_TESTS)
   set(TESTUTILLIB testutillib${ARTIFACT_SUFFIX})
   add_library(${TESTUTILLIB} STATIC ${TESTUTIL_SOURCE})
   target_link_libraries(${TESTUTILLIB} ${ROCKSDB_LIB} ${FOLLY_LIBS})
-  target_link_libraries(${TESTUTILLIB} 
-  ${ROCKSDB_LIB} 
-  Folly::folly 
-  Folly::folly_deps)
   if(MSVC)
     set_target_properties(${TESTUTILLIB} PROPERTIES COMPILE_FLAGS "/Fd${CMAKE_CFG_INTDIR}/testutillib${ARTIFACT_SUFFIX}.pdb")
   endif()
@@ -1630,45 +1581,38 @@ if(WITH_BENCHMARK_TOOLS)
     tools/tool_hooks.cc
     tools/db_bench_tool.cc)
   target_link_libraries(db_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${THIRDPARTY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${THIRDPARTY_LIBS})
 
   add_executable(cache_bench${ARTIFACT_SUFFIX}
     cache/cache_bench.cc
     cache/cache_bench_tool.cc)
   target_link_libraries(cache_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS})
 
   add_executable(memtablerep_bench${ARTIFACT_SUFFIX}
     memtable/memtablerep_bench.cc)
   target_link_libraries(memtablerep_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS})
 
   add_executable(range_del_aggregator_bench${ARTIFACT_SUFFIX}
     db/range_del_aggregator_bench.cc)
   target_link_libraries(range_del_aggregator_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS})
 
   add_executable(table_reader_bench${ARTIFACT_SUFFIX}
     table/table_reader_bench.cc)
   target_link_libraries(table_reader_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} testharness ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} testharness ${GFLAGS_LIB} ${FOLLY_LIBS})
 
   add_executable(filter_bench${ARTIFACT_SUFFIX}
     util/filter_bench.cc)
   target_link_libraries(filter_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS})
 
   add_executable(hash_table_bench${ARTIFACT_SUFFIX}
     utilities/persistent_cache/hash_table_bench.cc)
   target_link_libraries(hash_table_bench${ARTIFACT_SUFFIX}
-    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS} Folly::folly 
-    Folly::folly_deps)
+    ${ROCKSDB_LIB} ${GFLAGS_LIB} ${FOLLY_LIBS})
 endif()
 
 option(WITH_TRACE_TOOLS "build with trace tools" ON)

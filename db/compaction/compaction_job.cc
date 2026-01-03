@@ -142,7 +142,7 @@ CompactionJob::CompactionJob(
     const std::string& db_id, const std::string& db_session_id,
     std::string full_history_ts_low, std::string trim_ts,
     BlobFileCompletionCallback* blob_callback, int* bg_compaction_scheduled,
-    int* bg_bottom_compaction_scheduled)
+    int* bg_bottom_compaction_scheduled, int compaction_id)
     : compact_(new CompactionState(compaction)),
       internal_stats_(compaction->compaction_reason(), 1),
       db_options_(db_options),
@@ -182,7 +182,9 @@ CompactionJob::CompactionJob(
       blob_callback_(blob_callback),
       extra_num_subcompaction_threads_reserved_(0),
       bg_compaction_scheduled_(bg_compaction_scheduled),
-      bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled) {
+      bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled),
+      compaction_write_num_count(new std::atomic<uint64_t>(0)),
+      compaction_id_(compaction_id) {
   assert(job_stats_ != nullptr);
   assert(log_buffer_ != nullptr);
   assert(job_context->snapshot_context_initialized);
@@ -676,28 +678,36 @@ void CompactionJob::InitializeCompactionRun() {
   LogCompaction();
 }
 
-void CompactionJob::RunSubcompactions() {
+pausable_task CompactionJob::RunSubcompactions(
+    std::shared_ptr<compaction_task> task_ptr) {
   const size_t num_threads = compact_->sub_compact_states.size();
   assert(num_threads > 0);
   compact_->compaction->GetOrInitInputTableProperties();
 
   // Launch a thread for each of subcompactions 1...num_threads-1
-  //从这里开始第二部分，第二部分完全独立
-  std::vector<port::Thread> thread_pool;
-  thread_pool.reserve(num_threads - 1);
   for (size_t i = 1; i < compact_->sub_compact_states.size(); i++) {
-    thread_pool.emplace_back(&CompactionJob::ProcessKeyValueCompaction, this,
-                             &compact_->sub_compact_states[i]);
+    task_ptr->coro_handles.emplace_back(
+        CompactionJob::ProcessKeyValueCompaction(
+            &compact_->sub_compact_states[i]));
   }
+  task_ptr->coro_works_count = num_threads;
+  task_ptr->priority = this->compact_->compaction->output_level();
+  co_yield 0;
+  // std::vector<port::Thread> thread_pool;
+  // thread_pool.reserve(num_threads - 1);
+  // for (size_t i = 1; i < compact_->sub_compact_states.size(); i++) {
+  //   thread_pool.emplace_back(&CompactionJob::ProcessKeyValueCompaction, this,
+  //                            &compact_->sub_compact_states[i]);
+  // }
 
   // Always schedule the first subcompaction (whether or not there are also
   // others) in the current thread to be efficient with resources
-  ProcessKeyValueCompaction(compact_->sub_compact_states.data());
+  // ProcessKeyValueCompaction(compact_->sub_compact_states.data());
 
   // Wait for all other threads (if there are any) to finish execution
-  for (auto& thread : thread_pool) {
-    thread.join();
-  }
+  // for (auto& thread : thread_pool) {
+  //   thread.join();
+  // }
   RemoveEmptyOutputs();
 
   ReleaseSubcompactionResources();
@@ -929,24 +939,28 @@ void CompactionJob::FinalizeCompactionRun(
                            const_cast<Status*>(&input_status));
 }
 
-Status CompactionJob::Run() {
+pausable_task CompactionJob::Run(Status& status,
+                                 std::shared_ptr<compaction_task> task_ptr) {
   InitializeCompactionRun();
 
   const uint64_t start_micros = db_options_.clock->NowMicros();
 
-  RunSubcompactions();
+  auto task = RunSubcompactions(task_ptr);
+  while (!task.resume()) {
+    co_yield 0;
+  }
 
   UpdateTimingStats(start_micros);
 
   TEST_SYNC_POINT("CompactionJob::Run:BeforeVerify");
 
-  Status status = CollectSubcompactionErrors();
+  status = CollectSubcompactionErrors();
 
   if (status.ok()) {
     status = SyncOutputDirectories();
   }
 
-  if (status.ok()) {//存在磁盘文件的读取
+  if (status.ok()) {
     status = VerifyOutputFiles();
   }
 
@@ -966,7 +980,7 @@ Status CompactionJob::Run() {
   FinalizeCompactionRun(status, stats_built_from_input_table_prop,
                         num_input_range_del);
 
-  return status;
+  // return status;
 }
 
 Status CompactionJob::Install(bool* compaction_released) {
@@ -1189,14 +1203,15 @@ void CompactionJob::NotifyOnSubcompactionCompleted(
   }
 }
 
-void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
+pausable_task CompactionJob::ProcessKeyValueCompaction(
+    SubcompactionState* sub_compact) {
   assert(sub_compact);
   assert(sub_compact->compaction);
   if (db_options_.compaction_service) {
     CompactionServiceJobStatus comp_status =
         ProcessKeyValueCompactionWithCompactionService(sub_compact);
     if (comp_status != CompactionServiceJobStatus::kUseLocal) {
-      return;
+      co_return;
     }
     // fallback to local compaction
     assert(comp_status == CompactionServiceJobStatus::kUseLocal);
@@ -1220,7 +1235,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     sub_compact->status = Status::NotSupported(
         "CompactionFilter::IgnoreSnapshots() = false is not supported "
         "anymore.");
-    return;
+    co_return;
   }
 
   NotifyOnSubcompactionBegin(sub_compact);
@@ -1341,7 +1356,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     input = trim_history_iter.get();
   }
 
-  input->SeekToFirst();//compactionmergingiterator类型
+  input->SeekToFirst();
 
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_COMPACTION_PROCESS_KV);
@@ -1426,11 +1441,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   // used open/close output files when needed.
   const CompactionFileOpenFunc open_file_func =
       [this, sub_compact](CompactionOutputs& outputs) {
-        Status s=this->OpenCompactionOutputFile(sub_compact, outputs,this->compaction_id);
-       // outputs.file_writer_->writable_file_.fs_tracer_->guard_->compaction_id=this->compaction_id;
-       //outputs.file_writer_->writable_file_.fs_tracer_->target_->compaction_id=this->compaction_id;
-        return s;
-      };//创建新的空文件
+        return this->OpenCompactionOutputFile(sub_compact, outputs);
+      };
 
   const CompactionFileCloseFunc close_file_func =
       [this, sub_compact, start_user_key, end_user_key](
@@ -1447,7 +1459,20 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       "CompactionJob::ProcessKeyValueCompaction()::Processing",
       static_cast<void*>(const_cast<Compaction*>(sub_compact->compaction)));
   uint64_t last_cpu_micros = prev_cpu_micros;
+  int cnt = 0;
+  int todo_cnt = 1000;
+  uint64_t morsel_time = db_options_.clock->NowMicros();
   while (status.ok() && !cfd->IsDropped() && c_iter->Valid()) {
+    ++cnt;
+    if (cnt >= todo_cnt) {
+      uint64_t now = db_options_.clock->NowMicros();
+      uint64_t elapsed = now - morsel_time;
+      todo_cnt = todo_cnt * elapsed / 2000;
+      morsel_time = now;
+      cnt = 0;
+      co_yield 0;
+    }
+
     // Invariant: c_iter.status() is guaranteed to be OK if c_iter->Valid()
     // returns true.
     assert(!end.has_value() ||
@@ -1898,12 +1923,12 @@ Status CompactionJob::InstallCompactionResults(bool* compaction_released) {
   assert(edit);
 
   // Add compaction inputs
-  compaction->AddInputDeletions(edit);//记录成段的删除
+  compaction->AddInputDeletions(edit);
 
   std::unordered_map<uint64_t, BlobGarbageMeter::BlobStats> blob_total_garbage;
 
   for (const auto& sub_compact : compact_->sub_compact_states) {
-    sub_compact.AddOutputsEdit(edit);//需要改变
+    sub_compact.AddOutputsEdit(edit);
 
     for (const auto& blob : sub_compact.Current().GetBlobFileAdditions()) {
       edit->AddBlobFile(blob);
@@ -1982,7 +2007,7 @@ void CompactionJob::RecordCompactionIOStats() {
 }
 
 Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
-                                               CompactionOutputs& outputs,uint64_t compaction_id_) {
+                                               CompactionOutputs& outputs) {
   assert(sub_compact != nullptr);
 
   // no need to lock because VersionSet::next_file_number_ is atomic
@@ -2020,8 +2045,9 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
   fo_copy.write_hint = write_hint_;
 
   Status s;
-  IOStatus io_s = NewWritableFile(fs_.get(), fname, &writable_file, fo_copy);
-  writable_file->compaction_id=compaction_id_;
+  IOStatus io_s =
+      fs_->NewAsyncWritableFile(fname, fo_copy, &writable_file, nullptr,
+                                compaction_write_num_count, compaction_id_);
   s = io_s;
   if (sub_compact->io_status.ok()) {
     sub_compact->io_status = io_s;
@@ -2116,9 +2142,8 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       std::move(writable_file), fname, fo_copy, db_options_.clock, io_tracer_,
       db_options_.stats, Histograms::SST_WRITE_MICROS, listeners,
       db_options_.file_checksum_gen_factory.get(),
-      tmp_set.Contains(FileType::kTableFile), false));
-  //outputs.file_writer_->writable_file_.fs_tracer_->guard_->compaction_id=compaction_id;
-  //outputs.file_writer_->writable_file_.fs_tracer_->target_->compaction_id=compaction_id;
+      tmp_set.Contains(FileType::kTableFile),
+      false /* , use_io_uring=  true */));
 
   // TODO(hx235): pass in the correct `oldest_key_time` instead of `0`
   const ReadOptions read_options(Env::IOActivity::kCompaction);

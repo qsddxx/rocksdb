@@ -403,12 +403,6 @@ class MockWritableFile : public FSWritableFile {
     assert(use_direct_io_);
     return Append(data, options, dbg);
   }
-  IOStatus Append(AlignedBuffer& async_buf, const IOOptions& opts, IODebugContext* dbg) override {
-  return IOStatus::OK();
-}
-IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset, const IOOptions& opts, IODebugContext* dbg) override {
-  return IOStatus::OK();
-}
   IOStatus Truncate(uint64_t size, const IOOptions& options,
                     IODebugContext* dbg) override {
     file_->Truncate(static_cast<size_t>(size), options, dbg);

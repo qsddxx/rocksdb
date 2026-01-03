@@ -100,11 +100,6 @@ class DbStressWritableFileWrapper : public FSWritableFileOwnerWrapper {
     CheckIOActivity(options);
     return target()->Append(data, options, dbg);
   }
-  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
-                          IODebugContext* dbg)override{CheckIOActivity(options);return target()->Append(async_buf,options,dbg);};
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg)override{CheckIOActivity(options);return target()->PositionedAppend(async_buf,offset,options,dbg);};
   IOStatus Append(const Slice& data, const IOOptions& options,
                   const DataVerificationInfo& verification_info,
                   IODebugContext* dbg) override {

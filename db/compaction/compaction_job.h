@@ -21,6 +21,7 @@
 #include "db/column_family.h"
 #include "db/compaction/compaction_iterator.h"
 #include "db/compaction/compaction_outputs.h"
+#include "db/elastic/task.h"
 #include "db/flush_scheduler.h"
 #include "db/internal_stats.h"
 #include "db/job_context.h"
@@ -142,7 +143,6 @@ class SubcompactionState;
 
 class CompactionJob {
  public:
- uint64_t compaction_id=0;
   CompactionJob(int job_id, Compaction* compaction,
                 const ImmutableDBOptions& db_options,
                 const MutableDBOptions& mutable_db_options,
@@ -163,7 +163,8 @@ class CompactionJob {
                 std::string full_history_ts_low = "", std::string trim_ts = "",
                 BlobFileCompletionCallback* blob_callback = nullptr,
                 int* bg_compaction_scheduled = nullptr,
-                int* bg_bottom_compaction_scheduled = nullptr);
+                int* bg_bottom_compaction_scheduled = nullptr,
+                int compaction_id = -1);
 
   virtual ~CompactionJob();
 
@@ -185,7 +186,8 @@ class CompactionJob {
   // Launch threads for each subcompaction and wait for them to finish. After
   // that, verify table is usable and finally do bookkeeping to unify
   // subcompaction results
-  Status Run();
+  pausable_task Run(Status& status,
+                    std::shared_ptr<compaction_task> task_ptr = nullptr);
 
   // REQUIRED: mutex held
   // Add compaction input/output to the current version
@@ -205,7 +207,7 @@ class CompactionJob {
   void CleanupCompaction();
 
   // Iterate through input and compact the kv-pairs.
-  void ProcessKeyValueCompaction(SubcompactionState* sub_compact);
+  pausable_task ProcessKeyValueCompaction(SubcompactionState* sub_compact);
 
   CompactionState* compact_;
   InternalStats::CompactionStatsFull internal_stats_;
@@ -281,7 +283,7 @@ class CompactionJob {
   void ReleaseSubcompactionResources();
 
   void InitializeCompactionRun();
-  void RunSubcompactions();
+  pausable_task RunSubcompactions(std::shared_ptr<compaction_task> task_ptr);
   void UpdateTimingStats(uint64_t start_micros);
   void RemoveEmptyOutputs();
   bool HasNewBlobFiles() const;
@@ -310,7 +312,7 @@ class CompactionJob {
                                     const Slice* comp_end_user_key);
   Status InstallCompactionResults(bool* compaction_released);
   Status OpenCompactionOutputFile(SubcompactionState* sub_compact,
-                                  CompactionOutputs& outputs,uint64_t compaction_id);
+                                  CompactionOutputs& outputs);
 
   void RecordDroppedKeys(const CompactionIterationStats& c_iter_stats,
                          CompactionJobStats* compaction_job_stats = nullptr);
@@ -391,6 +393,10 @@ class CompactionJob {
   // The Compaction Read and Write priorities are the same for different
   // scenarios, such as write stalled.
   Env::IOPriority GetRateLimiterPriority();
+
+  std::atomic<uint64_t>* compaction_write_num_count;
+
+  int compaction_id_;
 };
 
 // CompactionServiceInput is used the pass compaction information between two

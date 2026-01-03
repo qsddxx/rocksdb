@@ -191,7 +191,7 @@ class CompactionOutputs {
       std::pair<SequenceNumber, SequenceNumber> keep_seqno_range,
       const Slice& next_table_min_key, const std::string& full_history_ts_low);
 
- public:
+ private:
   friend class SubcompactionState;
 
   void FillFilesToCutForTtl();
@@ -291,7 +291,6 @@ class CompactionOutputs {
 
   // current output builder and writer
   std::unique_ptr<TableBuilder> builder_;
-  public:
   std::unique_ptr<WritableFileWriter> file_writer_;
   uint64_t current_output_file_size_ = 0;
   SequenceNumber smallest_preferred_seqno_ = kMaxSequenceNumber;

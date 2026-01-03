@@ -4,7 +4,6 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #include "utilities/counted_fs.h"
-#include "util/aligned_buffer.h"
 #include <sstream>
 
 #include "rocksdb/file_system.h"
@@ -91,11 +90,6 @@ class CountedWritableFile : public FSWritableFileOwnerWrapper {
     fs_->counters()->writes.RecordOp(rv, data.size());
     return rv;
   }
-  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
-                          IODebugContext* dbg)override{IOStatus rv= target()->Append(async_buf,options,dbg);fs_->counters()->writes.RecordOp(rv, async_buf.CurrentSize());return rv;}
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg)override{IOStatus rv= target()->PositionedAppend(async_buf,offset,options,dbg);fs_->counters()->writes.RecordOp(rv, async_buf.CurrentSize());return rv;}
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& options,
                             IODebugContext* dbg) override {

@@ -4,9 +4,6 @@
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).#pragma once
 #pragma once
-#ifndef FOLLY_F14_INTRINSICS_MODE
-#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
-#endif
 #if USE_COROUTINES
 #include "file/random_access_file_reader.h"
 #include "folly/coro/ViaIfAsync.h"

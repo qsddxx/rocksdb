@@ -56,7 +56,6 @@ class Arena;
 
 class FlushJob {
  public:
-  uint64_t flushjob_id=0;
   // TODO(icanadi) make effort to reduce number of parameters here
   // IMPORTANT: mutable_cf_options needs to be alive while FlushJob is alive
   FlushJob(const std::string& dbname, ColumnFamilyData* cfd,

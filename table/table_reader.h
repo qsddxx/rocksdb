@@ -9,9 +9,6 @@
 
 #pragma once
 #include <memory>
-#ifndef FOLLY_F14_INTRINSICS_MODE
-#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
-#endif
 #include "db/range_tombstone_fragmenter.h"
 #if USE_COROUTINES
 #include "folly/coro/Coroutine.h"

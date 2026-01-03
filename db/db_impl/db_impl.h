@@ -70,6 +70,9 @@
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
 
+#include "liburing.h"
+#include "db/elastic/task.h"
+
 namespace ROCKSDB_NAMESPACE {
 
 class Arena;
@@ -86,6 +89,8 @@ class WriteCallback;
 struct JobContext;
 struct ExternalSstFileInfo;
 struct MemTableInfo;
+
+class ElasticLSMImpl;
 
 // Class to maintain directories for all database paths other than main one.
 class Directories {
@@ -2399,6 +2404,8 @@ class DBImpl : public DB {
 
   void MaybeScheduleFlushOrCompaction();
 
+  void BackgroundMaybeScheduleFlushOrCompaction();
+
   struct FlushRequest {
     FlushReason flush_reason;
     // A map from column family to flush to largest memtable id to persist for
@@ -2455,14 +2462,15 @@ class DBImpl : public DB {
   static void BGWorkPurge(void* arg);
   static void UnscheduleCompactionCallback(void* arg);
   static void UnscheduleFlushCallback(void* arg);
-  void BackgroundCallCompaction(PrepickedCompaction* prepicked_compaction,
-                                Env::Priority thread_pri);
+  pausable_task BackgroundCallCompaction(
+      PrepickedCompaction* prepicked_compaction, Env::Priority thread_pri,
+      std::shared_ptr<compaction_task> task_ptr = nullptr);
   void BackgroundCallFlush(Env::Priority thread_pri);
   void BackgroundCallPurge();
-  Status BackgroundCompaction(bool* madeProgress, JobContext* job_context,
-                              LogBuffer* log_buffer,
-                              PrepickedCompaction* prepicked_compaction,
-                              Env::Priority thread_pri);
+  pausable_task BackgroundCompaction(
+      bool* madeProgress, JobContext* job_context, LogBuffer* log_buffer,
+      PrepickedCompaction* prepicked_compaction, Env::Priority thread_pri,
+      Status& status, std::shared_ptr<compaction_task> task_ptr = nullptr);
   Status BackgroundFlush(bool* madeProgress, JobContext* job_context,
                          LogBuffer* log_buffer, FlushReason* reason,
                          bool* flush_rescheduled_to_retain_udt,
@@ -3180,6 +3188,11 @@ class DBImpl : public DB {
   // The number of LockWAL called without matching UnlockWAL call.
   // See also lock_wal_write_token_
   uint32_t lock_wal_count_ = 0;
+
+  // elastic related
+  friend class ElasticLSMImpl;
+
+  ElasticLSMImpl* elastic_lsm_impl_ = nullptr;
 };
 
 class GetWithTimestampReadCallback : public ReadCallback {

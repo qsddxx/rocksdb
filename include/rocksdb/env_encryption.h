@@ -274,12 +274,6 @@ class EncryptedWritableFile : public FSWritableFile {
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& options,
                             IODebugContext* dbg) override;
-  IOStatus Append(AlignedBuffer& async_buf, const IOOptions& opts, IODebugContext* dbg) override {
-  return IOStatus::OK();
-}
-IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset, const IOOptions& opts, IODebugContext* dbg) override {
-  return IOStatus::OK();
-}
   bool IsSyncThreadSafe() const override;
 
   bool use_direct_io() const override;

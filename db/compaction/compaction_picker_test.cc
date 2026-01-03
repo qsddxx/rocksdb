@@ -87,7 +87,7 @@ class CompactionPickerTestBase : public testing::Test {
         &icmp_, ucmp_, options_.num_levels, style, nullptr, false,
         EpochNumberRequirement::kMustPresent, ioptions_.clock,
         options_.bottommost_file_compaction_delay,
-        OffpeakTimeOption(mutable_db_options_.daily_offpeak_time_utc),10));
+        OffpeakTimeOption(mutable_db_options_.daily_offpeak_time_utc), ioptions_.level_per_segment_level));
     vstorage_->PrepareForVersionAppend(ioptions_, mutable_cf_options_);
   }
 
@@ -98,7 +98,7 @@ class CompactionPickerTestBase : public testing::Test {
         &icmp_, ucmp_, options_.num_levels, ioptions_.compaction_style,
         vstorage_.get(), false, EpochNumberRequirement::kMustPresent,
         ioptions_.clock, options_.bottommost_file_compaction_delay,
-        OffpeakTimeOption(mutable_db_options_.daily_offpeak_time_utc),10));
+        OffpeakTimeOption(mutable_db_options_.daily_offpeak_time_utc), ioptions_.level_per_segment_level));
   }
 
   void DeleteVersionStorage() {

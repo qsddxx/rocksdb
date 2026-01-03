@@ -75,7 +75,7 @@ Status BuildTable(
     Env::WriteLifeTimeHint write_hint, const std::string* full_history_ts_low,
     BlobFileCompletionCallback* blob_callback, Version* version,
     uint64_t* memtable_payload_bytes, uint64_t* memtable_garbage_bytes,
-    InternalStats::CompactionStats* flush_stats,uint64_t compaction_id) {
+    InternalStats::CompactionStats* flush_stats) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -148,7 +148,8 @@ Status BuildTable(
       FileOptions fo_copy = file_options;
       fo_copy.write_hint = write_hint;
       IOStatus io_s = NewWritableFile(fs, fname, &file, fo_copy);
-      file->compaction_id=compaction_id;
+      // IOStatus io_s = fs->NewAsyncWritableFile(fname, fo_copy, &file, nullptr,
+      //                                          new std::atomic<uint64_t>(0));
       assert(s.ok());
       s = io_s;
       if (io_status->ok()) {
@@ -173,7 +174,8 @@ Status BuildTable(
           std::move(file), fname, file_options, ioptions.clock, io_tracer,
           ioptions.stats, Histograms::SST_WRITE_MICROS, ioptions.listeners,
           ioptions.file_checksum_gen_factory.get(),
-          tmp_set.Contains(FileType::kTableFile), false));
+          tmp_set.Contains(FileType::kTableFile), false/*,
+           use_io_uring=  true*/));
 
       builder = NewTableBuilder(tboptions, file_writer.get());
     }

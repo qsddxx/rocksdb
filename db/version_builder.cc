@@ -95,37 +95,12 @@ class VersionBuilder::Rep {
    private:
     const InternalKeyComparator* cmp_;
   };
-  struct DeletedFileGroup
-  {
-    InternalKey smallest;
-    InternalKey largest;
-    std::vector<std::vector<uint64_t>> files_;
-  };
-  struct AddedFileGroup
-  {
-    InternalKey smallest;
-    InternalKey largest;
-    std::vector<std::vector<FileMetaData*>> files_;
-  };
   struct LevelState {
     std::unordered_set<uint64_t> deleted_files;
-    // Map from file number to file meta data.
     std::unordered_map<uint64_t, FileMetaData*> added_files;
-    std::vector<FileMetaData*> middle_added_files;
-    std::vector<FileMetaData*> final_added_files;
-    std::unordered_map<uint64_t,FileMetaData*> added_files_for_judge;//无用
-    std::unordered_set<uint64_t> deleted_files_for_judge;//无用
-    std::unordered_map<uint64_t,Segment*> added_segments;//无用
-    //std::unordered_map<uint64_t,Segment*> added_segments_by_changed;
-    std::unordered_map<uint64_t,Segment*> deleted_segments;//无用
-    std::unordered_map<uint64_t,Segment*> deleted_segments_caused_trush;//无用
-    //std::unordered_map<uint64_t,Segment*> deleted_segments_not_exit;
-    //std::vector<DeletedFileGroup> deleted_files_from_non_exit_segment;
-    //std::vector<AddedFileGroup> added_files_from_non_exit_segment;
-    //std::unordered_set<uint64_t> deleted_segments_history;
-    //std::unordered_set<uint64_t> added_segments_history;
-    //std::vector<Segment*> deleted_segments_not_available;
-    //std::vector<Segment*> added_segments_not_available;
+    std::unordered_map<uint64_t, uint64_t> added_files_id;
+    std::vector<FileMetaData*> added_files_in_order;
+    std::vector<bool> compaction_added_files_sign;
   };
 
   // A class that represents the accumulated changes (like additional garbage or
@@ -276,52 +251,17 @@ class VersionBuilder::Rep {
     uint64_t garbage_blob_count_ = 0;
     uint64_t garbage_blob_bytes_ = 0;
   };
-  //std::unordered_map<uint64_t,int> deleted_files_by_segment_;
-  std::unordered_map<uint64_t,int> added_files_single;//无用
-  std::unordered_map<uint64_t,int> added_files_by_segment_;//无用
-  std::unordered_map<uint64_t,int> files_may_caused_trush;//无用
-  //std::unordered_set<uint64_t>added_segment_history;
-  //std::unordered_set<uint64_t>deleted_segment_history;
 
   const FileOptions& file_options_;
   const ImmutableCFOptions* const ioptions_;
   TableCache* table_cache_;
   VersionStorageInfo* base_vstorage_;
   mutable std::vector<std::vector<Segment*>> base_segment_;
-   /*class FileLocation {
-   public:
-    FileLocation() = default;
-    FileLocation(int level, size_t position)
-        : level_(level), position_(position) {}
-
-    int GetLevel() const { return level_; }
-    size_t GetPosition() const { return position_; }
-
-    bool IsValid() const { return level_ >= 0; }
-
-    bool operator==(const FileLocation& rhs) const {
-      return level_ == rhs.level_ && position_ == rhs.position_;
-    }
-
-    bool operator!=(const FileLocation& rhs) const { return !(*this == rhs); }
-
-    static FileLocation Invalid() { return FileLocation(); }
-
-   private:
-    int level_ = -1;
-    size_t position_ = 0;
-  };*/
-  using SegmentLocations=UnorderedMap<uint64_t,rocksdb::VersionStorageInfo::FileLocation>;
-  SegmentLocations segment_locations_;
-  int level_per_segment_level=10;
-  //std::atomic<uint64_t>& next_segment_number_;
   mutable bool has_new_versionedit;
   mutable bool has_base_segemnt_trush;
   VersionSet* version_set_;
   int num_levels_;
   LevelState* levels_;
-  std::unordered_map<int,bool> deleted_segments_map{};
-  std::unordered_set<uint64_t> compaction_added_files_set{};
   // Store sizes of levels larger than num_levels_. We do this instead of
   // storing them in levels_ to avoid regression in case there are no files
   // on invalid levels. The version is not consistent if in the end the files
@@ -388,6 +328,8 @@ class VersionBuilder::Rep {
   // End of fields that are only tracked when `track_found_and_missing_files_`
   // is enabled.
 
+  int level_per_segment_level_;
+
  public:
   Rep(const FileOptions& file_options, const ImmutableCFOptions* ioptions,
       TableCache* table_cache, VersionStorageInfo* base_vstorage,
@@ -395,16 +337,10 @@ class VersionBuilder::Rep {
       std::shared_ptr<CacheReservationManager> file_metadata_cache_res_mgr,
       ColumnFamilyData* cfd, VersionEditHandler* version_edit_handler,
       bool track_found_and_missing_files, bool allow_incomplete_valid_version)
-      : added_files_single(),
-        added_files_by_segment_(),
-        files_may_caused_trush(),
-        file_options_(file_options),
+      : file_options_(file_options),
         ioptions_(ioptions),
         table_cache_(table_cache),
         base_vstorage_(base_vstorage),
-        segment_locations_(base_vstorage->GetSegmentMap()),
-        level_per_segment_level(base_vstorage->GetLevelPerSegmentLevel()),
-        //next_segment_number_(version_set->GetSegmentNumber()),
         has_new_versionedit(false),
         has_base_segemnt_trush(false),
         version_set_(version_set),
@@ -419,7 +355,8 @@ class VersionBuilder::Rep {
         cfd_(cfd),
         version_edit_handler_(version_edit_handler),
         track_found_and_missing_files_(track_found_and_missing_files),
-        allow_incomplete_valid_version_(allow_incomplete_valid_version) {
+        allow_incomplete_valid_version_(allow_incomplete_valid_version),
+        level_per_segment_level_(ioptions->level_per_segment_level) {
     assert(ioptions_);
 
     levels_ = new LevelState[num_levels_];
@@ -438,16 +375,10 @@ class VersionBuilder::Rep {
   }
 
   Rep(const Rep& other)
-      : added_files_single(other.added_files_single),
-        added_files_by_segment_(other.added_files_by_segment_),
-        files_may_caused_trush(other.files_may_caused_trush),
-        file_options_(other.file_options_),
+      : file_options_(other.file_options_),
         ioptions_(other.ioptions_),
         table_cache_(other.table_cache_),
         base_vstorage_(other.base_vstorage_),
-        segment_locations_(other.segment_locations_),
-        level_per_segment_level(base_vstorage_->GetLevelPerSegmentLevel()),
-        //next_segment_number_(other.version_set_->GetSegmentNumber()),
         has_new_versionedit(other.has_new_versionedit),
         has_base_segemnt_trush(other.has_base_segemnt_trush),
         version_set_(other.version_set_),
@@ -474,7 +405,8 @@ class VersionBuilder::Rep {
         valid_version_available_(other.valid_version_available_),
         edited_in_atomic_group_(other.edited_in_atomic_group_),
         version_updated_since_last_check_(
-            other.version_updated_since_last_check_) {
+            other.version_updated_since_last_check_),
+        level_per_segment_level_(other.level_per_segment_level_) {
     assert(ioptions_);
     levels_ = new LevelState[num_levels_];
     for (int level = 0; level < num_levels_; level++) {
@@ -740,63 +672,6 @@ class VersionBuilder::Rep {
                              &ret_s);
     return ret_s;
   }
-  //无用
-  std::pair<int,int> GetLevelForSegment(int position)const
-  {
-    /*int number=0;
-    for(int i=0;i<position;i++)
-    {
-      number+=level_per_segment_level[i];
-    }
-    int number1=number+level_per_segment_level[position]-1;
-    std::pair<int,int> result(number,number1);
-    return result;*/
-    std::pair<int,int> result(position*level_per_segment_level,(1+position)*level_per_segment_level-1);
-    return result;
-  }
-  //无用
-  int GetInsertLevelForSegment(int level)const
-  {
-    /*int i=-1;
-    int j=0;
-    for(;i<int(level_per_segment_level.size());i++)
-    {
-      j+=level_per_segment_level[i];
-      if(j>=level)
-      {
-        break;
-      }
-    }
-    if(i==int(level_per_segment_level.size())&&j<level)
-    {
-      return (i);
-    }
-    return i;*/
-    for(int i=0;;i++)
-    {
-      if((i+1)*level_per_segment_level>level)
-      {
-        return i;
-      }
-    }
-  }
-  //无用
-  void MakeDeleteSegmentClear()const
-  {
-    for(int i=0;i<num_levels_;i++)
-    {
-      for(auto&j:levels_[i].deleted_segments_caused_trush)
-      {
-        delete j.second;
-      }
-      levels_[i].deleted_segments.clear();
-      levels_[i].deleted_segments_caused_trush.clear();
-      levels_[i].added_segments.clear();
-      //levels_[i].added_segments_by_changed.clear();
-      levels_[i].deleted_files_for_judge.clear();
-      levels_[i].added_files_for_judge.clear();
-    }
-  }
   Status CheckConsistency(const VersionStorageInfo* vstorage) const {
     assert(vstorage);
 
@@ -980,118 +855,6 @@ class VersionBuilder::Rep {
 
     return meta->oldest_blob_file_number;
   }
-  //无用
-  Status ApplyFileDeletionIncompletely(int level,uint64_t file_number)
-  {
-    const uint64_t blob_file_number =
-        GetOldestBlobFileNumberForTableFile(level, file_number);
-
-    if (blob_file_number != kInvalidBlobFileNumber)
-    {
-      MutableBlobFileMetaData* const mutable_meta =
-          GetOrCreateMutableBlobFileMetaData(blob_file_number);
-      if (mutable_meta)
-      {
-        mutable_meta->UnlinkSst(file_number);
-      }
-    }
-    auto& level_state = levels_[level];
-    auto& add_files = level_state.added_files;
-    auto add_it = add_files.find(file_number);
-    if (add_it != add_files.end())
-    {
-      UnrefFile(add_it->second);
-      add_files.erase(add_it);
-    }
-    auto& del_files = level_state.deleted_files;
-    assert(del_files.find(file_number) == del_files.end());
-
-    table_file_levels_[file_number] =
-        VersionStorageInfo::FileLocation::Invalid().GetLevel();
-
-    if (track_found_and_missing_files_)
-    {
-      assert(version_edit_handler_);
-      if (l0_missing_files_.find(file_number) != l0_missing_files_.end())
-      {
-        l0_missing_files_.erase(file_number);
-      }
-      else if (non_l0_missing_files_.find(file_number) !=non_l0_missing_files_.end())
-      {
-        non_l0_missing_files_.erase(file_number);
-      }
-      else
-      {
-        auto fiter = found_files_.find(file_number);
-        // Only mark new files added during this catchup attempt for deletion.
-        // These files were never installed in VersionStorageInfo.
-        // Already referenced files that are deleted by a VersionEdit will
-        // be added to the VersionStorageInfo's obsolete files when the old
-        // version is dereferenced.
-        if (fiter != found_files_.end()) {
-          assert(!ioptions_->cf_paths.empty());
-          found_files_.erase(fiter);
-        }
-      }
-    }
-
-    return Status::OK();
-  }
-  //无用
-  Status ApplyFileDeletionIncompletelyWithTrashRecycle(int level,uint64_t file_number)
-  {
-    const uint64_t blob_file_number =
-        GetOldestBlobFileNumberForTableFile(level, file_number);
-
-    if (blob_file_number != kInvalidBlobFileNumber)
-    {
-      MutableBlobFileMetaData* const mutable_meta =
-          GetOrCreateMutableBlobFileMetaData(blob_file_number);
-      if (mutable_meta)
-      {
-        mutable_meta->UnlinkSst(file_number);
-      }
-    }
-    auto& level_state = levels_[level];
-    auto& add_files = level_state.added_files;
-    auto add_it = add_files.find(file_number);
-    if (add_it != add_files.end())
-    {
-      UnrefFile(add_it->second);
-      add_files.erase(add_it);
-    }
-    auto& del_files = level_state.deleted_files;
-    assert(del_files.find(file_number) == del_files.end());
-
-    table_file_levels_[file_number] =
-        VersionStorageInfo::FileLocation::Invalid().GetLevel();
-
-    if (track_found_and_missing_files_) {
-      assert(version_edit_handler_);
-      if (l0_missing_files_.find(file_number) != l0_missing_files_.end()) {
-        l0_missing_files_.erase(file_number);
-      } else if (non_l0_missing_files_.find(file_number) !=
-                 non_l0_missing_files_.end()) {
-        non_l0_missing_files_.erase(file_number);
-      } else {
-        auto fiter = found_files_.find(file_number);
-        // Only mark new files added during this catchup attempt for deletion.
-        // These files were never installed in VersionStorageInfo.
-        // Already referenced files that are deleted by a VersionEdit will
-        // be added to the VersionStorageInfo's obsolete files when the old
-        // version is dereferenced.
-        if (fiter != found_files_.end()) {
-          assert(!ioptions_->cf_paths.empty());
-          intermediate_files_.emplace_back(
-              MakeTableFileName(ioptions_->cf_paths[0].path, file_number));
-          found_files_.erase(fiter);
-        }
-      }
-    }
-
-    return Status::OK();
-  }
-  
   Status ApplyFileDeletion(int level, uint64_t file_number) {
     assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
 
@@ -1177,312 +940,9 @@ class VersionBuilder::Rep {
 
     return Status::OK();
   }
-  //无用
-  Status ApplySegmentAddition(const Segment& sp,int new_level)
-  {
-      std::ostringstream oss;
-      auto it=levels_[new_level].added_segments.find(sp.GetSegmentNum());
-      if(it!=levels_[new_level].added_segments.end())
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      Segment* s=new Segment(sp);
-      levels_[new_level].added_segments.emplace(s->GetSegmentNum(),s);
-      return Status::OK();
-  }
-  //无用
-  Status ApplySegmentChanged(const Segment& sp,int level,int new_level)
-  {
-    std::ostringstream oss;
-      auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
-      if(it!=levels_[level].deleted_segments.end())
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      auto it1=levels_[new_level].added_segments.find(sp.GetSegmentNum());
-      if(it1!=levels_[new_level].added_segments.end())
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      auto position=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum());
-      if(position.GetLevel()==VersionStorageInfo::FileLocation::Invalid().GetLevel()||position.GetLevel()!=level)
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      Segment* seg=base_segment_[position.GetLevel()][position.GetPosition()];
-      Segment* s=new Segment(*seg);
-      levels_[level].deleted_segments.emplace(s->GetSegmentNum(),s);
-      levels_[new_level].added_segments.emplace(s->GetSegmentNum(),s);
-      /*auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
-      if(it!=levels_[level].deleted_segments.end())
-      {
-        return;
-      }
-      auto it2=levels_[level].added_segments.find(sp.GetSegmentNum());
-      if(it!=levels_[level].added_segments.end())
-      {
-        return;
-      }
-      int actual_level=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum()).GetLevel();
-      if(level!=actual_level)
-      {
-        if(actual_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
-        {
-          std::vector<std::vector<FileMetaData*>> filelist=sp.get_files();
-          for(int i=0;i<int(filelist.size());i++)
-          {
-            bool is_ok=false;
-            for(auto& file:filelist[i])
-            {
-              int based_level=GetFileLocation(file->fd.GetNumber()).GetLevel();
-              if(based_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
-              {
 
-              }
-              else
-              {
-                for(int i=1;;i++)
-                {
-                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1>level_per_segment_level*i-1)||(based_level>i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
-                  {
-                    is_ok=true;
-                    return;
-                  }
-                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1)&&(based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
-                  {
-                    is_ok=false;
-                    Segment* s=new Segment(sp);
-                    std::vector<std::vector<FileMetaData*>> filelist=s->get_files();
-                    for(int i=0;i<int(filelist.size());i++)
-                    {
-                      for(auto&f:filelist[i] )
-                      {
-                        FileMetaData* new_file=new FileMetaData(*f);
-                        new_file->refs=1;
-                        levels_[(level+1)*level_per_segment_level-i].deleted_files_from_non_exit_segment.emplace(f->fd.GetNumber());
-                        levels_[(new_level+1)*level_per_segment_level-i].added_files_from_non_exit_segment.emplace(f->fd.GetNumber(),new_file);
-                      }
-                    }
-                    return;
-                  }
-                }
-                break;
-              }
-            }
-            if(is_ok)
-            {
-              return;
-            }
-          }
-          return;
-        }
-        else
-        {
-          return;
-        }
-      }
-      Segment* s = new Segment(sp);
-      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
-      //s->UpdateSegmentIsChanged();
-      levels_[level].deleted_segments.emplace(s->GetSegmentNum(),const_cast<Segment*>(s));
-      levels_[new_level].added_segments_by_changed.emplace(s->GetSegmentNum(),const_cast<Segment*>(s));
-      //added_segment_history.emplace(sp.GetSegmentNum());
-      //deleted_segment_history.emplace(sp.GetSegmentNum());*/
-      return Status::OK();
-      //version_updated=true;
-  }
-  rocksdb::VersionStorageInfo::FileLocation GetSegmentLocation(uint64_t segment_number)
-  {
-    const auto it = segment_locations_.find(segment_number);
-
-    if (it == segment_locations_.end()) {
-      return rocksdb::VersionStorageInfo::FileLocation::Invalid();
-    }
-
-    /*assert(it->second.GetLevel() < num_levels_);
-    assert(it->second.GetPosition() < files_[it->second.GetLevel()].size());
-    assert(files_[it->second.GetLevel()][it->second.GetPosition()]);
-    assert(files_[it->second.GetLevel()][it->second.GetPosition()]
-               ->fd.GetNumber() == file_number);*/
-
-    return it->second;
-  }
-  //无用
-  Status ApplySegmentDeletion(const Segment&sp,int level)
-  {
-      std::ostringstream oss;
-      auto it=levels_[level].deleted_segments.find(sp.GetSegmentNum());
-      if(it!=levels_[level].deleted_segments.end())
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      auto position=base_vstorage_->GetSegmentLocation(sp.GetSegmentNum());
-      if(position.GetLevel()==VersionStorageInfo::FileLocation::Invalid().GetLevel()||position.GetLevel()!=level)
-      {
-        return Status::Corruption("VersionBuilder", oss.str());
-      }
-      Segment* seg=base_segment_[position.GetLevel()][position.GetPosition()];
-      Segment* s=new Segment(*seg);
-      levels_[level].deleted_segments_caused_trush.emplace(s->GetSegmentNum(),s);
-      /*int actual_level=GetSegmentLocation(sp.GetSegmentNum()).GetLevel();
-      if(level!=actual_level)
-      {
-        if(actual_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
-        {
-          std::vector<std::vector<FileMetaData*>> filelist=sp.get_files();
-          for(int i=0;i<int(filelist.size());i++)
-          {
-            bool is_ok=false;
-            for(auto& file:filelist[i])
-            {
-              int based_level=GetFileLocation(file->fd.GetNumber()).GetLevel();
-              if(based_level==VersionStorageInfo::FileLocation::Invalid().GetLevel())
-              {
-
-              }
-              else
-              {
-                for(int i=1;;i++)
-                {
-                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1>level_per_segment_level*i-1)||(based_level>i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
-                  {
-                    is_ok=true;
-                    return;
-                  }
-                  if((based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1)&&(based_level<=i*level_per_segment_level-1&&(level+1)*level_per_segment_level-1<=level_per_segment_level*i-1))
-                  {
-                    is_ok=false;
-                    Segment* s=new Segment(sp);
-                    std::vector<std::vector<FileMetaData*>> filelist=s->get_files();
-                    for(int i=0;i<int(filelist.size());i++)
-                    {
-                      for(auto&f:filelist[i] )
-                      {
-                        levels_[(i+1)*level_per_segment_level-i].deleted_files_from_non_exit_segment.emplace(f->fd.GetNumber());
-                      }
-                    }
-                    return;
-                  }
-                }
-                break;
-              }
-            }
-            if(is_ok)
-            {
-              return;
-            }
-          }
-          return;
-        }
-        else
-        {
-          return;
-        }
-      }
-      //Segment* s = new Segment(sp);
-      //s->UpdateSegmentNum(version_set_->NewSegmentNumber());
-      //s->UpdateSegmentIsChanged();
-      levels_[level].deleted_segments_caused_trush.emplace(sp.GetSegmentNum(),&sp);
-      //added_segment_history.emplace(sp.GetSegmentNum());
-      //deleted_segment_history.emplace(sp.GetSegmentNum());*/
-      return Status::OK();
-    }
-//无用
-  Status ApplyFileAddition(int level, FileMetaData* meta) {
-    assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
-
-    const uint64_t file_number = meta->fd.GetNumber();
-
-    const int current_level = GetCurrentLevelForTableFile(file_number);
-
-    if (current_level !=
-        VersionStorageInfo::FileLocation::Invalid().GetLevel()) {
-      if (level >= num_levels_) {
-        has_invalid_levels_ = true;
-      }
-
-      std::ostringstream oss;
-      oss << "Cannot add table file #" << file_number << " to level " << level
-          << " since it is already in the LSM tree on level " << current_level;
-      return Status::Corruption("VersionBuilder", oss.str());
-    }
-
-    if (level >= num_levels_) {
-      ++invalid_level_sizes_[level];
-      table_file_levels_[file_number] = level;
-
-      return Status::OK();
-    }
-
-    auto& level_state = levels_[level];
-
-    auto& del_files = level_state.deleted_files;
-    auto del_it = del_files.find(file_number);
-    if (del_it != del_files.end()) {
-      del_files.erase(del_it);
-    }
-
-    FileMetaData*  f = meta;
-    //f->refs = 1;
-
-    if (file_metadata_cache_res_mgr_) {
-      Status s = file_metadata_cache_res_mgr_->UpdateCacheReservation(
-          f->ApproximateMemoryUsage(), true /* increase */);
-      if (!s.ok()) {
-        delete f;
-        s = Status::MemoryLimit(
-            "Can't allocate " +
-            kCacheEntryRoleToCamelString[static_cast<std::uint32_t>(
-                CacheEntryRole::kFileMetadata)] +
-            " due to exceeding the memory limit "
-            "based on "
-            "cache capacity");
-        return s;
-      }
-    }
-
-    auto& add_files = level_state.added_files;
-    assert(add_files.find(file_number) == add_files.end());
-    add_files.emplace(file_number, f);
-    const uint64_t blob_file_number = f->oldest_blob_file_number;
-
-    if (blob_file_number != kInvalidBlobFileNumber) {
-      MutableBlobFileMetaData* const mutable_meta =
-          GetOrCreateMutableBlobFileMetaData(blob_file_number);
-      if (mutable_meta) {
-        mutable_meta->LinkSst(file_number);
-      }
-    }
-
-    table_file_levels_[file_number] = level;
-
-    Status s;
-    if (track_found_and_missing_files_) {
-      assert(version_edit_handler_);
-      assert(!ioptions_->cf_paths.empty());
-      const std::string fpath =
-          MakeTableFileName(ioptions_->cf_paths[0].path, file_number);
-      s = version_edit_handler_->VerifyFile(cfd_, fpath, level, *meta);
-      if (s.IsPathNotFound() || s.IsNotFound() || s.IsCorruption()) {
-        if (0 == level) {
-          l0_missing_files_.insert(file_number);
-        } else {
-          non_l0_missing_files_.insert(file_number);
-        }
-        if (s.IsCorruption()) {
-          found_files_.insert(file_number);
-        }
-        s = Status::OK();
-      } else if (!s.ok()) {
-        return s;
-      } else {
-        found_files_.insert(file_number);
-      }
-    }
-
-    return s;
-  }
-Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaData* return_value) {
+  Status ApplyFileAddition(int level, const FileMetaData& meta,
+                           bool compaction) {
     assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
 
     const uint64_t file_number = meta.fd.GetNumber();
@@ -1516,7 +976,7 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
       del_files.erase(del_it);
     }
 
-    FileMetaData* const f = return_value;
+    FileMetaData* const f = new FileMetaData(meta);
     f->refs = 1;
 
     if (file_metadata_cache_res_mgr_) {
@@ -1536,8 +996,14 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
     }
 
     auto& add_files = level_state.added_files;
+    auto& add_files_id = level_state.added_files_id;
+    auto& add_files_in_order = level_state.added_files_in_order;
+    auto& compaction_sign = level_state.compaction_added_files_sign;
     assert(add_files.find(file_number) == add_files.end());
     add_files.emplace(file_number, f);
+    add_files_id.emplace(file_number, add_files_in_order.size() - 1);
+    add_files_in_order.emplace_back(f);
+    compaction_sign.emplace_back(compaction);
 
     const uint64_t blob_file_number = f->oldest_blob_file_number;
 
@@ -1594,7 +1060,6 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
   }
 
   // Apply all of the edits in *edit to the current state.
-  //在这里，我们进行这样的设计：我们需要
   Status Apply(const VersionEdit* edit) {
     bool version_updated = false;
     {
@@ -1627,45 +1092,32 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
     }
 
     // Delete table files
-    for (const auto& deleted_file : edit->GetDeletedFiles())
-    {
-      int file_number=deleted_file.second;
-      int level=base_vstorage_->GetFileLocation(file_number).GetLevel();
-      int segment_=base_vstorage_->GetFileInWhichSegment(file_number);
-      if(static_cast<int>(level/level_per_segment_level)!=static_cast<int>(deleted_file.first/level_per_segment_level))
-      {
-        continue;
-      }
+    for (const auto& deleted_file : edit->GetDeletedFiles()) {
+      const int level = deleted_file.first;
+      const uint64_t file_number = deleted_file.second;
+
       const Status s = ApplyFileDeletion(level, file_number);
-      if (!s.ok())
-      {
+      if (!s.ok()) {
         return s;
       }
-      deleted_segments_map.emplace(segment_,false);
       version_updated = true;
     }
+
     // Add new table files
-    for (auto& new_file : edit->GetNewFiles())/*在这里，插入的单个文件要么从来没有在lsm中出现，要么是换层，且换层的的删除与插入在同一个edit中，则上方已经将删除的记录删掉了，故这里不需再检查*/
-    {
-      levels_[(static_cast<int>(new_file.first/level_per_segment_level)+1)*level_per_segment_level-1].middle_added_files.emplace_back(const_cast<FileMetaData*>(new FileMetaData(new_file.second)));
-    }
-    for(const auto& deleted_segments:edit->GetDeletedSegments())
-    {
-      if(base_vstorage_->JudgeSegment(deleted_segments.second.GetSegmentNum()))
-      {
-        deleted_segments_map[deleted_segments.second.GetSegmentNum()]=true;
+    for (const auto& new_file : edit->GetNewFiles()) {
+      const int level = new_file.first;
+      const FileMetaData& meta = new_file.second;
+
+      const Status s =
+          ApplyFileAddition(level, meta, edit->GetDeletedFiles().size() > 1);
+      if (!s.ok()) {
+        return s;
       }
+      version_updated = true;
     }
+
     // Populate compact cursors for round-robin compaction, leave
     // the cursor to be empty to indicate it is invalid
-    for(auto& compaction_added_files_:edit->GetCompactionAddedFiles())
-    {
-      if(compaction_added_files_==-1)
-      {
-        continue;
-      }
-      compaction_added_files_set.emplace(compaction_added_files_);
-    }
     for (const auto& cursor : edit->GetCompactCursors()) {
       const int level = cursor.first;
       const InternalKey smallest_uncompacted_key = cursor.second;
@@ -1681,7 +1133,6 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
         edited_in_atomic_group_ = true;
       }
     }
-    has_invalid_levels_=true;
     return Status::OK();
   }
 
@@ -2065,2113 +1516,251 @@ Status ApplyFileAdditionWithReturn(int level, const FileMetaData& meta,FileMetaD
       SaveSSTFilesTo(vstorage, level, *level_nonzero_cmp_);
     }
   }
-  //无用
-  void ApplySegmentFileDeletion(FileMetaData* p,int level,int num)
-  {
-          //auto it1=deleted_files_by_segment_.find(p->fd.GetNumber());
-          auto it2=files_may_caused_trush.find(p->fd.GetNumber());
-          auto it3=added_files_by_segment_.find(p->fd.GetNumber());
-          auto it4=added_files_single.find(p->fd.GetNumber());
-          uint64_t file_number = p->fd.GetNumber();
-            if(it3!=added_files_by_segment_.end())
-            {
-              if(it2==files_may_caused_trush.end())
-              {
-                int level1=it2->second;
-                const Status s=ApplyFileDeletionIncompletely(level1,file_number);
-                added_files_by_segment_.erase(it3);
-              }
-              else
-              {
-                  int level2=it2->second;
-                  const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level2,file_number);
-                  added_files_by_segment_.erase(it3);
-                  files_may_caused_trush.erase(it2);
-              }
-            }
-            else if(it4!=added_files_single.end())
-            {
-              if(it2==files_may_caused_trush.end())
-              {
-                int level3=it2->second;
-                const Status s=ApplyFileDeletionIncompletely(level3,file_number);
-                added_files_single.erase(it3);
-              }
-              else
-              {
-                  int level4=it2->second;
-                  const Status s=ApplyFileDeletionIncompletelyWithTrashRecycle(level4,file_number);
-                  added_files_single.erase(it4);
-                  files_may_caused_trush.erase(it2);
-              }
-            }
-            else
-            {
-              ApplyFileDeletion((((level+1)*level_per_segment_level)-1)-num,p->fd.GetNumber());
-              //levels_[(((level+1)*level_per_segment_level)-1)-std::get<1>(p)].deleted_files.emplace(std::get<0>(p)->fd.GetNumber());
-            }
-          //deleted_files_by_segment_.emplace(file_number,(((level+1)*level_per_segment_level)-1)-num);
-  }
-  /*无法处理以下情形：
-  1.当该层级参与合并时，需确保该层级不可发生有重叠范围段的合并，否则会有重叠的文件，
-    即我们在合并时，只使用段来换层或加入一个段，尽量不删除一个段
-  2.不可发生有重叠范围段的删除（该段已经被合并消失，找不到这个段）
-  3.不允许一个层级有多个有重叠范围的段向其发生合并，否则会有段内文件新旧的问题
-  4.允许在一个segment进行换层时，对其中的一个单独的文件进行增删操作
-  5.段中的压缩由versionbuilder直接进行，不需要手动触发。我们不需传入合并后产生的段*/
-inline bool JudgeFileInRange(InternalKey largest,InternalKey smallest,const Comparator* ucmp,std::pair<InternalKey,InternalKey> key_range,std::pair<bool,bool> has_key)
-{
-  if(has_key.first==true&&has_key.second==true)
-  {
-    return ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(key_range.first.Encode()))>0&&ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(key_range.second.Encode()))<0;
-  }
-  else if(has_key.first==true&&has_key.second==false)
-  {
-    return ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(key_range.first.Encode()))>0;
-  }
-  else if(has_key.first==false&&has_key.second==true)
-  {
-    return ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(key_range.second.Encode()))<0;
-  }
-  else
-  {
-    return true;
-  }
-}
-inline bool JudgeShouldStop(InternalKey largest,InternalKey target_key,bool has_target_key,const Comparator* ucmp)
-{
-  if(!has_target_key)
-  {
-    return false;
-  }
-  else
-  {
-    return ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(target_key.Encode()))>=0;
-  }
-}
-bool ShouldCutTheSegment(std::vector<std::pair<InternalKey,InternalKey>> key_range,std::vector<std::pair<bool,bool>> has_key,const Comparator* ucmp)
-{
-  InternalKey smallest;
-  InternalKey largest;
-  bool has_smallest=false;
-  bool has_largest=false;
-  for(int i=0;i<static_cast<int>(key_range.size());i++)
-  {
-    if(has_key[i].first==true&&has_key[i].second==true)
-    {
-      if(!has_smallest)
-      {
-        smallest=key_range[i].first;
-        has_smallest=true;
-      }
-      else
-      {
-        smallest=ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(key_range[i].first.Encode()))>=0?smallest:key_range[i].first;
-      }
-      if(!has_largest)
-      {
-        largest=key_range[i].second;
-        has_largest=true;
-      }
-      else
-      {
-        largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(key_range[i].second.Encode()))<=0?largest:key_range[i].second;
-      }
-    }
-    else if(has_key[i].first==true&&has_key[i].second==false)
-    {
-      if(!has_smallest)
-      {
-        smallest=key_range[i].first;
-        has_smallest=true;
-      }
-      else
-      {
-        smallest=ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(key_range[i].first.Encode()))>=0?smallest:key_range[i].first;
-      }
-    }
-    else if(has_key[i].first==false&&has_key[i].second==true)
-    {
-      if(!has_largest)
-      {
-        largest=key_range[i].second;
-        has_largest=true;
-      }
-      else
-      {
-        largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(key_range[i].second.Encode()))<=0?largest:key_range[i].second;
-      }
-    }
-    else
-    {
 
-    }
+  bool CheckOverlapping(Segment* seg, FileMetaData* f,
+                        const InternalKeyComparator* cmp) const {
+    return !(cmp->Compare(seg->largest, f->smallest) < 0 ||
+             cmp->Compare(f->largest, seg->smallest) < 0);
   }
-  if(has_smallest==true&&has_largest==true)
-  {
-    return ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(largest.Encode()))<0;
-  }
-  else
-  {
-    return true;
-  }
-}
-std::vector<std::vector<std::vector<FileMetaData*>>*> AddFileForSegment(VersionStorageInfo* vstorage_final,int segment_level,std::vector<std::vector<FileMetaData*>>* final_segment_filelist,std::vector<std::vector<FileMetaData*>>& segment_filelist,int max_level,const InternalKeyComparator* cmp)
-{
-  std::vector<std::vector<std::vector<FileMetaData*>>*> return_value_list{};
-  int lower=0;
-  int upper=max_level;
-  std::vector<std::pair<std::vector<FileMetaData*>::iterator,std::vector<FileMetaData*>::iterator>> segment_iterator_list;
-  for(int i=0;i<=max_level;i++)
-  {
-    segment_iterator_list.emplace_back(segment_filelist[i].begin(),segment_filelist[i].end());
-  }
-  std::vector<std::pair<std::vector<FileMetaData*>::iterator,std::vector<FileMetaData*>::iterator>> newfile_iterator_list;
-  for(int i=0;i<=max_level;i++)
-  {
-    newfile_iterator_list.emplace_back(levels_[(segment_level+1)*level_per_segment_level-1-i].final_added_files.begin(),levels_[(segment_level+1)*level_per_segment_level-1-i].final_added_files.end());
-  }
-  std::vector<bool> not_empty_level(max_level+1,true);
-  std::vector<std::pair<InternalKey,InternalKey>> key_range;
-  bool should_remove=false;
-  std::vector<std::pair<bool,bool>> has_key(max_level+1,std::make_pair(false,false));
-  std::vector<FileMetaData*> middle_new_filelist;
-  //FileMetaData* return_value;
-  key_range.resize(max_level+1);
-  InternalKey target_key;
-  InternalKey next_target_key;
-  bool has_next_target_key=false;
-  //bool has_target_key_at_beginner;
-  bool has_target_key=false;
-  std::vector<bool> level_should_retry(max_level+1,false);
-  int beginner=0;
-  auto ucmp=cmp->user_comparator();
-  bool has_emplaced;
-  bool is_empty_segment;
-  while(lower<=upper)
-  {
-    is_empty_segment=true;
-    has_emplaced=false;
-    has_target_key=false;
-    has_next_target_key=false;
-    //has_target_key_at_beginner=false;
-    for(int i=0;i<=max_level;i++)
-    {
-      level_should_retry[i]=false;
-    }
-    if(beginner!=lower)
-    {
-      target_key=next_target_key;
-      has_target_key=true;
-    }
-    for(int i=beginner;i<=upper;i++)
-    {
-      middle_new_filelist.clear();
-      while(not_empty_level[i])
-      {
-        if(segment_iterator_list[i].first==segment_iterator_list[i].second)
-        {
-          if(newfile_iterator_list[i].first==newfile_iterator_list[i].second)
-          {
-            if(i==lower)
-            {
-              lower++;
-            }
-            if(i==upper)
-            {
-              upper--;
-            }
-            not_empty_level[i]=false;
-            break;
-          }
-          else
-          {
-            if(levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.find((*newfile_iterator_list[i].first)->fd.GetNumber())!=levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.end())
-            {
-                should_remove=true;
-                key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                newfile_iterator_list[i].first++;
-            }
-            else
-            {
-              if(i!=lower)
-              {
-                if(JudgeShouldStop((*newfile_iterator_list[i].first)->largest,target_key,has_target_key,ucmp))
-                {
-                  if(!should_remove)
-                  {
-                    //not_empty_level[i]=false;
-                  }
-                  break;
-                }
-                if(JudgeFileInRange((*newfile_iterator_list[i].first)->largest,(*newfile_iterator_list[i].first)->smallest,ucmp,key_range[i-1],has_key[i-1]))
-                {
-                  should_remove=true;
-                  middle_new_filelist.emplace_back(*newfile_iterator_list[i].first);
-                  (*newfile_iterator_list[i].first)->refs++;
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  newfile_iterator_list[i].first++;
-                }
-                else
-                {
-                  if(should_remove)
-                  {
-                    level_should_retry[i]=true;
-                    break;
-                  }
-                  else
-                  {
-                    ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-i,**newfile_iterator_list[i].first,*newfile_iterator_list[i].first);
-                    (*newfile_iterator_list[i].first)->refs++;
-                    (*final_segment_filelist)[i].emplace_back(*newfile_iterator_list[i].first);
-                    newfile_iterator_list[i].first++;
-                  }
-                }
-              }
-              else
-              {
-                if(should_remove)
-                {
-                  break;
-                }
-                else
-                {
-                  ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-i,**newfile_iterator_list[i].first,*newfile_iterator_list[i].first);
-                  (*newfile_iterator_list[i].first)->refs++;
-                  (*final_segment_filelist)[i].emplace_back(*newfile_iterator_list[i].first);
-                  segment_iterator_list[i].first++;
-                }
-              }
-            }
-          }
-        }
-        else if(newfile_iterator_list[i].first==newfile_iterator_list[i].second)
-        {
-          if(segment_iterator_list[i].first==segment_iterator_list[i].second)
-          {
-            if(i==lower)
-            {
-              lower++;
-            }
-            if(i==upper)
-            {
-              upper--;
-            }
-            not_empty_level[i]=false;
-            break;
-          }
-          else
-          {
-            if(levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.find((*segment_iterator_list[i].first)->fd.GetNumber())!=levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.end())
-            {
-              vstorage_final->RemoveCurrentStats(*segment_iterator_list[i].first);
-              if(i==0)
-              {
-                auto it3=newfile_iterator_list[0].first;
-                auto target=(*segment_iterator_list[0].first)->largest;
-                auto target1=(*segment_iterator_list[0].first)->smallest;
-                bool has_overlaped;
-                int num=0;
-                if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0)
-                {
-                  if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0)
-                  {
-                    has_overlaped=true;
-                  }
-                }
-                if(has_overlaped)
-                {
-                  if(should_remove)
-                  {
-                    segment_iterator_list[i].first++;
-                    break;
-                  }
-                  else
-                  {
-                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0)
-                    {
-                      do
-                      {
-                        if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
-                        {
-                          break;
-                        }
-                        ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
-                        (*final_segment_filelist)[0].emplace_back(*it3);
-                        (*newfile_iterator_list[i].first)->refs++;
-                        it3++;
-                        newfile_iterator_list[0].first++;
-                      }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
-                    }
-                  }
-                }
-                else
-                {
-                  should_remove=true;
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  segment_iterator_list[i].first++;
-                }
-              }
-              else
-              {
-                should_remove=true;
-                key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                segment_iterator_list[i].first++;
-              }
-            }
-            else
-            {
-              if(i!=lower)
-              {
-                if(JudgeShouldStop((*newfile_iterator_list[i].first)->largest,target_key,has_target_key,ucmp))
-                {
-                  if(!should_remove)
-                  {
-                    //not_empty_level[i]=false;
-                  }
-                  break;
-                }
-                if(JudgeFileInRange((*segment_iterator_list[i].first)->largest,(*segment_iterator_list[i].first)->smallest,ucmp,key_range[i-1],has_key[i-1]))
-                {
-                  should_remove=true;
-                  middle_new_filelist.emplace_back(new FileMetaData(**segment_iterator_list[i].first));
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  ApplyFileDeletion(level_per_segment_level*(segment_level+1)-i-1,(*segment_iterator_list[i].first)->fd.GetNumber());
-                  segment_iterator_list[i].first++;
-                }
-                else
-                {
-                  if(should_remove)
-                  {
-                    level_should_retry[i]=true;
-                    break;
-                  }
-                  else
-                  {
-                    (*final_segment_filelist)[i].emplace_back(*segment_iterator_list[i].first);
-                    segment_iterator_list[i].first++;
-                  }
-                }
-              }
-              else
-              {
-                if(should_remove)
-                {
-                  break;
-                }
-                else
-                {
-                  (*final_segment_filelist)[i].emplace_back(*segment_iterator_list[i].first);
-                  segment_iterator_list[i].first++;
-                }
-              }
-            }
-          }
-        }
-        else
-        {
-          if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*segment_iterator_list[i].first)->smallest.Encode()),ExtractUserKey((*newfile_iterator_list[i].first)->smallest.Encode()))<=0)
-          {
-            if(levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.find((*segment_iterator_list[i].first)->fd.GetNumber())!=levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.end())
-            {
-              vstorage_final->RemoveCurrentStats(*segment_iterator_list[i].first);
-              if(i==0)
-              {
-                auto it3=newfile_iterator_list[0].first;
-                auto target=(*segment_iterator_list[0].first)->largest;
-                auto target1=(*segment_iterator_list[0].first)->smallest;
-                bool has_overlaped;
-                int num=0;
-                if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0)
-                {
-                  if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0)
-                  {
-                    has_overlaped=true;
-                  }
-                }
-                if(has_overlaped)
-                {
-                  if(should_remove)
-                  {
-                    segment_iterator_list[i].first++;
-                    break;
-                  }
-                  else
-                  {
-                    if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0)
-                    {
-                      do
-                      {
-                        if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target.Encode()))<=0))
-                        {
-                          break;
-                        }
-                        ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it3,*it3);
-                        (*final_segment_filelist)[0].emplace_back(*it3);
-                        (*newfile_iterator_list[i].first)->refs++;
-                        it3++;
-                        newfile_iterator_list[0].first++;
-                      }while(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->smallest.Encode()),ExtractUserKey(target.Encode()))<=0&&ucmp->CompareWithoutTimestamp(ExtractUserKey((*it3)->largest.Encode()),ExtractUserKey(target1.Encode()))>=0&&it3!=newfile_iterator_list[0].second);
-                    }
-                  }
-                }
-                else
-                {
-                  should_remove=true;
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  segment_iterator_list[i].first++;
-                }
-              }
-              else
-              {
-                should_remove=true;
-                key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                segment_iterator_list[i].first++;
-              }
-            }
-            else
-            {
-              if(i!=lower)
-              {
-                if(JudgeShouldStop((*newfile_iterator_list[i].first)->largest,target_key,has_target_key,ucmp))
-                {
-                  if(!should_remove)
-                  {
-                    //not_empty_level[i]=false;
-                  }
-                  break;
-                }
-                if(JudgeFileInRange((*segment_iterator_list[i].first)->largest,(*segment_iterator_list[i].first)->smallest,ucmp,key_range[i-1],has_key[i-1]))
-                {
-                  should_remove=true;
-                  middle_new_filelist.emplace_back(new FileMetaData(**segment_iterator_list[i].first));
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  ApplyFileDeletion(level_per_segment_level*(segment_level+1)-i-1,(*segment_iterator_list[i].first)->fd.GetNumber());
-                  segment_iterator_list[i].first++;
-                }
-                else
-                {
-                  if(should_remove)
-                  {
-                    level_should_retry[i]=true;
-                    break;
-                  }
-                  else
-                  {
-                    (*final_segment_filelist)[i].emplace_back(*segment_iterator_list[i].first);
-                    segment_iterator_list[i].first++;
-                  }
-                }
-              }
-              else
-              {
-                if(should_remove)
-                {
-                  break;
-                }
-                else
-                {
-                  (*final_segment_filelist)[i].emplace_back(*segment_iterator_list[i].first);
-                  segment_iterator_list[i].first++;
-                }
-              }
-            }
-          }
-          else
-          {
-            if(levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.find((*newfile_iterator_list[i].first)->fd.GetNumber())!=levels_[(segment_level+1)*level_per_segment_level-1-i].deleted_files.end())
-            {
-              should_remove=true;
-              key_range[i].second=(*segment_iterator_list[i].first)->largest;
-              newfile_iterator_list[i].first++;
-            }
-            else
-            {
-              if(i!=lower)
-              {
-                if(JudgeShouldStop((*newfile_iterator_list[i].first)->largest,target_key,has_target_key,ucmp))
-                {
-                  if(!should_remove)
-                  {
-                    //not_empty_level[i]=false;
-                  }
-                  break;
-                }
-                if(JudgeFileInRange((*newfile_iterator_list[i].first)->largest,(*newfile_iterator_list[i].first)->smallest,ucmp,key_range[i-1],has_key[i-1]))
-                {
-                  should_remove=true;
-                  middle_new_filelist.emplace_back(*newfile_iterator_list[i].first);
-                  (*newfile_iterator_list[i].first)->refs++;
-                  key_range[i].second=(*segment_iterator_list[i].first)->largest;
-                  newfile_iterator_list[i].first++;
-                }
-                else
-                {
-                  if(should_remove)
-                  {
-                    level_should_retry[i]=true;
-                    break;
-                  }
-                  else
-                  {
-                    ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-i,**newfile_iterator_list[i].first,*newfile_iterator_list[i].first);
-                    (*final_segment_filelist)[i].emplace_back(*newfile_iterator_list[i].first);
-                    (*newfile_iterator_list[i].first)->refs++;
-                    newfile_iterator_list[i].first++;
-                  }
-                }
-              }
-              else
-              {
-                if(should_remove)
-                {
-                  break;
-                }
-                else
-                {
-                  ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-i,**newfile_iterator_list[i].first,*newfile_iterator_list[i].first);
-                  (*final_segment_filelist)[i].emplace_back(*newfile_iterator_list[i].first);
-                  (*newfile_iterator_list[i].first)->refs++;
-                  segment_iterator_list[i].first++;
-                }
-              }
-            }
-          }
-        }
-      }
-      if(!final_segment_filelist[i].empty())
-      {
-        key_range[i].first=((*final_segment_filelist)[i].back())->largest;
-        has_key[i].first=true;
-      }
-      else
-      {
-        has_key[i].first=false;
-      }
-      if(segment_iterator_list[i].first!=segment_iterator_list[i].second&&newfile_iterator_list[i].first!=newfile_iterator_list[i].second)
-      {
-        key_range[i].second=ucmp->CompareWithoutTimestamp(ExtractUserKey((*segment_iterator_list[i].first)->smallest.Encode()),ExtractUserKey((*newfile_iterator_list[i].first)->smallest.Encode()))<=0?(*segment_iterator_list[i].first)->smallest:(*newfile_iterator_list[i].first)->smallest;
-        has_key[i].second=true;
-        if(has_target_key)
-        {
-          target_key=ucmp->CompareWithoutTimestamp(ExtractUserKey((*segment_iterator_list[i].first)->smallest.Encode()),ExtractUserKey(target_key.Encode()))<=0?(*segment_iterator_list[i].first)->smallest:target_key;
-          target_key=ucmp->CompareWithoutTimestamp(ExtractUserKey((*newfile_iterator_list[i].first)->smallest.Encode()),ExtractUserKey(target_key.Encode()))<=0?(*newfile_iterator_list[i].first)->smallest:target_key;
-        }
-        else
-        {
-          target_key=ucmp->CompareWithoutTimestamp(ExtractUserKey((*segment_iterator_list[i].first)->smallest.Encode()),ExtractUserKey((*newfile_iterator_list[i].first)->smallest.Encode()))<=0?(*segment_iterator_list[i].first)->smallest:(*newfile_iterator_list[i].first)->smallest;
-        }
-        has_target_key=true;
-      }
-      else if(segment_iterator_list[i].first!=segment_iterator_list[i].second)
-      {
-        key_range[i].second=(*segment_iterator_list[i].first)->smallest;
-        has_key[i].second=true;
-        if(has_target_key)
-        {
-          target_key=ucmp->CompareWithoutTimestamp(ExtractUserKey((*segment_iterator_list[i].first)->smallest.Encode()),ExtractUserKey(target_key.Encode()))<=0?(*segment_iterator_list[i].first)->smallest:target_key;
-        }
-        else
-        {
-          target_key=(*segment_iterator_list[i].first)->smallest;
-        }
-        has_target_key=true;
-      }
-      else if(newfile_iterator_list[i].first!=newfile_iterator_list[i].second)
-      {
-        key_range[i].second=(*newfile_iterator_list[i].first)->smallest;
-        has_key[i].second=true;
-        if(has_target_key)
-        {
-          target_key=ucmp->CompareWithoutTimestamp(ExtractUserKey((*newfile_iterator_list[i].first)->smallest.Encode()),ExtractUserKey(target_key.Encode()))<=0?(*segment_iterator_list[i].first)->smallest:target_key;
-        }
-        else
-        {
-          target_key=(*newfile_iterator_list[i].first)->smallest;
-        }
-        has_target_key=true;
-      }
-      else
-      {
-        has_key[i].second=false;
-      }
-      if((!has_next_target_key)&&has_target_key)
-      {
-        next_target_key=target_key;
-        has_next_target_key=true;
-      }
-      if(should_remove)
-      {
-        auto it1=middle_new_filelist.begin();
-        auto it2=middle_new_filelist.end();
-        int middle_judge_level=i-1;
-        while(it1!=it2&&middle_judge_level>=0)
-        {
-          if(has_key[middle_judge_level].first==false&&has_key[middle_judge_level].second==false)
-          {
-            middle_judge_level--;
-            //continue;
-          }
-          else if(has_key[middle_judge_level].first==true&&has_key[middle_judge_level].second==false)
-          {
-            while(ucmp->CompareWithoutTimestamp(ExtractUserKey(key_range[i].first.Encode()),ExtractUserKey((*it1)->smallest.Encode()))>=0&&it1!=it2)
-            {
-              ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-middle_judge_level-1,**it1,*it1);
-              (*final_segment_filelist)[middle_judge_level+1].emplace_back(*it1);
-              key_range[middle_judge_level+1].first=(*it1)->largest;
-              has_key[middle_judge_level+1].first=true;
-              it1++;
-            }
-            middle_judge_level--;
-          }
-          else if(has_key[middle_judge_level].first==false&&has_key[middle_judge_level].second==true)
-          {
-            auto it2_begin=it2;
-            while(ucmp->CompareWithoutTimestamp(ExtractUserKey(key_range[i].second.Encode()),ExtractUserKey((*(it2-1))->largest.Encode()))<=0&&it1!=it2)
-            {
-              it2--;
-            }
-            auto it2_end=it2;
-            for(;it2_begin!=it2_begin;it2_end++)
-            {
-              ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-middle_judge_level-1,**it2_end,*it2_end);
-              (*final_segment_filelist)[middle_judge_level+1].emplace_back(*it2_end);
-              key_range[middle_judge_level+1].first=(*it2_end)->largest;
-              has_key[middle_judge_level+1].first=true;
-            }
-            middle_judge_level--;
-          }
-          else
-          {
-            while(ucmp->CompareWithoutTimestamp(ExtractUserKey(key_range[i].first.Encode()),ExtractUserKey((*it1)->smallest.Encode()))>=0&&it1!=it2)
-            {
-              ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-middle_judge_level-1,**it1,*it1);
-              (*final_segment_filelist)[middle_judge_level+1].emplace_back(*it1);
-              key_range[middle_judge_level+1].first=(*it1)->largest;
-              has_key[middle_judge_level+1].first=true;
-              it1++;
-            }
-            auto it2_begin=it2;
-            while(ucmp->CompareWithoutTimestamp(ExtractUserKey(key_range[i].second.Encode()),ExtractUserKey((*it2-1)->largest.Encode()))<=0&&it1!=it2)
-            {
-              it2--;
-            }
-            auto it2_end=it2;
-            for(;it2_begin!=it2_begin;it2_end++)
-            {
-              ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1-middle_judge_level-1,**it2_end,*it2_end);
-              (*final_segment_filelist)[middle_judge_level+1].emplace_back(*it2_end);
-              key_range[middle_judge_level+1].first=(*it2_end)->largest;
-              has_key[middle_judge_level+1].first=true;
-            }
-            middle_judge_level--;
-          }
-        }
-        while(it1!=it2)
-        {
-          ApplyFileAdditionWithReturn((segment_level+1)*level_per_segment_level-1,**it1,*it1);
-          key_range[0].first=(*it1)->largest;
-          has_key[0].first=true;
-          it1++;
-        }
-      }
-    }
-    bool level_lable=false;
-    for(int i=0;i<static_cast<int>(level_should_retry.size());i++)
-    {
-      if(level_should_retry[i]==true)
-      {
-        level_lable=true;
-        beginner=i;
-        break;
-      }
-    }
-    if(!level_lable)
-    {
-      beginner=lower;
-    }
-    //bool is_empty_segment=true;
-    for(auto f:*final_segment_filelist)
-    {
-      if(!f.empty())
-      {
-        is_empty_segment=false;
-        break;
-      }
-    }
-    if(!is_empty_segment)
-    {
-      if(ShouldCutTheSegment(key_range,has_key,ucmp))
-      {
-        has_emplaced=true;
-        return_value_list.emplace_back(std::move(final_segment_filelist));
-        final_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-        final_segment_filelist->resize(level_per_segment_level);
-      }
-    }
-  }
-  if(upper==lower)
-  {
-    auto final_newfile_it1=newfile_iterator_list[lower].first;
-    auto final_newfile_it2=newfile_iterator_list[lower].second;
-    auto final_segment_it1=segment_iterator_list[lower].first;
-    auto final_segment_it2=segment_iterator_list[lower].second;
-    int insert_level=(segment_level+1)*level_per_segment_level-1-upper;
-    while(final_newfile_it1!=final_newfile_it2||final_segment_it1!=final_segment_it2)
-    {
-      if(final_newfile_it1==final_newfile_it2)
-      {
-        while(final_segment_it1!=final_segment_it2)
-        {
-          (*final_segment_filelist)[upper].emplace_back(*final_segment_it1);
-          final_segment_it1++;
-        }
-        break;
-      }
-      else if(final_segment_it1==final_segment_it2)
-      {
-        while(final_newfile_it1!=final_newfile_it2)
-        {
-          ApplyFileAdditionWithReturn(insert_level,**final_newfile_it1,*final_newfile_it1);
-          (*final_segment_filelist)[upper].emplace_back(*final_newfile_it1);
-          final_newfile_it1++;
-        }
-        break;
-      }
-      else
-      {
-        if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*final_newfile_it1)->smallest.Encode()),ExtractUserKey((*final_segment_it1)->smallest.Encode()))<=0)
-        {
-          ApplyFileAdditionWithReturn(insert_level,**final_newfile_it1,*final_newfile_it1);
-          (*final_segment_filelist)[upper].emplace_back(*final_newfile_it1);
-          final_newfile_it1++;
-        }
-        else
-        {
-          (*final_segment_filelist)[upper].emplace_back(*final_segment_it1);
-          final_segment_it1++;
-        }
-      }
-    }
-  }
-  else
-  {
 
+  Segment* CreateSegment(
+      const std::vector<std::pair<FileMetaData*, int>>& files, int begin,
+      int end, const InternalKeyComparator* cmp) const {
+    std::map<int, int> levels_map;
+    for (int i = begin; i < end; ++i) {
+      levels_map[files[i].second];
+    }
+    int index = 0;
+    for (auto& level : levels_map) {
+      level.second = index++;
+    }
+    std::vector<std::vector<FileMetaData*>> segment_files;
+    segment_files.resize(levels_map.size());
+    for (int i = begin; i < end; ++i) {
+      auto level = files[i].second;
+      auto file = files[i].first;
+      segment_files[levels_map[level]].push_back(file);
+    }
+    return new Segment(segment_files, cmp, version_set_->NewSegmentNumber());
   }
-  if(has_emplaced)
-  {
-    delete final_segment_filelist;
-  }
-  else
-  {
-    if(is_empty_segment)
-    {
-      delete final_segment_filelist;
-    }
-    else
-    {
-      return_value_list.emplace_back(final_segment_filelist);
-    }
-  }
-  return return_value_list;
-}
-void AppendFileListAtLast(std::vector<std::vector<FileMetaData*>> files_,std::vector<std::vector<FileMetaData*>> added_files)
-{
-    int new_level=added_files.size();
-    int i=0;
-    for(;i<new_level;i++)
-    {
-      for(auto added_file:added_files[i])
-      {
-        files_[i].emplace_back(added_file);
-      }
-    }
-}
-int HasOverlapWithLevel(int segment_level,int lvl, const FileMetaData* file, const InternalKeyComparator* cmp,std::vector<std::vector<FileMetaData*>>& files_)
-  {
-    auto ucmp=cmp->user_comparator();
-    auto& level_files = files_[segment_level*level_per_segment_level-1-lvl];
-    
-    if (level_files.empty())
-    {
-      return lvl;
-    }
-    if (ucmp->CompareWithoutTimestamp(ExtractUserKey(file->largest.Encode()), ExtractUserKey(level_files[0]->smallest.Encode())) < 0)
-    {
-        return lvl;
-    }
-    if(ucmp->CompareWithoutTimestamp(ExtractUserKey(file->smallest.Encode()), ExtractUserKey((level_files.back())->largest.Encode())) > 0)
-    {
-        return lvl;
-    }
-    auto it = std::lower_bound(level_files.begin(), level_files.end(), file,
-        [ucmp](const FileMetaData* a, const FileMetaData* b) {
-            return ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()), ExtractUserKey(b->largest.Encode())) <= 0;
-        });
-    if (it != level_files.begin())
-    {
-        if (!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*(it--))->smallest.Encode()),ExtractUserKey(file->smallest.Encode()))>=0))
-        {
-          return -1;
-        }
-    }
-    else
-    {
-        return lvl;
-    }
-    return lvl;
-}
-int GetL0InputLevel(std::vector<std::vector<FileMetaData*>>& filelist,std::vector<FileMetaData*>new_files,const InternalKeyComparator* cmp,int segment_not_empty_level)
-{
-  auto ucmp=cmp->user_comparator();
-  int level=segment_not_empty_level;
-  int largest_level=0;
-  int max_level=-1;
-  InternalKey smallest;
-  InternalKey largest;
-  for(auto& file:new_files)
-  {
-    if(compaction_added_files_set.find(file->fd.GetNumber())!=compaction_added_files_set.end())
-    {
-      levels_[level_per_segment_level-1].final_added_files.emplace_back(file);
-      continue;
-    }
-    int actual_level=-1;
-    if(!(ucmp->CompareWithoutTimestamp(ExtractUserKey(file->smallest.Encode()),ExtractUserKey(largest.Encode()))>=0||ucmp->CompareWithoutTimestamp(ExtractUserKey(file->largest.Encode()),ExtractUserKey(smallest.Encode()))<=0))
-    {
-      actual_level=largest_level;
-    }
-    int lvl=level-1;
-    if(lvl<=actual_level)
-    {
-      levels_[level_per_segment_level-actual_level-2].final_added_files.emplace_back(file);
-      largest_level=std::max(largest_level,largest_level+1);
-      largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(file->largest.Encode()))>=0?largest:file->largest;
-      smallest=ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(file->smallest.Encode()))<=0?smallest:file->smallest;
-      max_level=std::max(max_level,actual_level+1);
-      continue;
-    }
-    for (; lvl >=actual_level+1; --lvl)
-    {
-        int p=HasOverlapWithLevel(0,lvl, file, cmp,filelist);
-        if (p==-1)
-        {
-            //levels_[level_per_segment_level-lvl-2].final_added_files.emplace_back(file);
-            //largest_level=std::max(largest_level,lvl+1);
-            //largest=cmp->Compare(largest,file->largest)>=0?largest:file->largest;
-            //max_level=std::max(max_level,lvl+1);
-            //continue;
-            break;
-        }
-    }
-    levels_[level_per_segment_level-lvl-2].final_added_files.emplace_back(file);
-    largest_level=std::max(largest_level,lvl+1);
-    largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(largest.Encode()),ExtractUserKey(file->largest.Encode()))>=0?largest:file->largest;
-    smallest=ucmp->CompareWithoutTimestamp(ExtractUserKey(smallest.Encode()),ExtractUserKey(file->smallest.Encode()))<=0?smallest:file->smallest;
-    max_level=std::max(max_level,lvl+1);
-  }
-  return max_level;
-}
-int GetInputLevel(std::vector<std::vector<FileMetaData*>>& filelist,std::vector<FileMetaData*>new_files,const InternalKeyComparator* cmp,int segment_not_empty_level,int segment_level)
-{
-  int level=segment_not_empty_level;
-  int largest_level=0;
-  int max_level=-1;
-  for(auto& file:new_files)
-  {
-    if(compaction_added_files_set.find(file->fd.GetNumber())!=compaction_added_files_set.end())
-    {
-      levels_[(segment_level+1)*level_per_segment_level-1].final_added_files.emplace_back(file);
-      continue;
-    }
-    int lvl=level-1;
-    for (; lvl >=0; --lvl)
-    {
-        int p=HasOverlapWithLevel(0,lvl, file, cmp,filelist);
-        if (p==-1)
-        {
-            //levels_[(segment_level+1)*level_per_segment_level-lvl-2].final_added_files.emplace_back(file);
-            //max_level=std::max(max_level,lvl+1);
-            //continue;
-            break;
-        }
-    }
-    levels_[(segment_level+1)*level_per_segment_level-lvl-2].final_added_files.emplace_back(file);
-    max_level=std::max(max_level,lvl+1);
-  }
-  return max_level;
-}
-void AddFileForEmptyL0Segment(std::vector<std::vector<FileMetaData*>>* final_new_filelist,std::vector<FileMetaData*> new_file_list,const InternalKeyComparator* cmp)
-{
-  int upper=0;
-  auto it1=new_file_list.begin();
-  auto it2=new_file_list.end();
-  auto ucmp=cmp->user_comparator();
-  FileMetaData* return_value;
-  //std::vector<std::pair<InternalKey,InternalKey>> key_range;
-  while(it1!=it2)
-  {
-    (*it1)->refs++;
-    for(int i=upper;i>=0;i--)
-    {
-      if(i==0&&final_new_filelist[i].empty())
-      {
-        ApplyFileAdditionWithReturn(level_per_segment_level-1,**it1,*it1);
-        (*final_new_filelist)[i].emplace_back(*it1);
-        //key_range[i].first=(*it1)->smallest;
-        //key_range[i].second=(*it1)->largest;
-        it1++;
-        upper++;
-        break;
-      }
-      else
-      {
-        if(final_new_filelist[i].empty())
-        {
 
-        }
-        else
-        {
-          if(ucmp->CompareWithoutTimestamp(ExtractUserKey((*it1)->smallest.Encode()),ExtractUserKey((*final_new_filelist)[i].back()->largest.Encode()))<=0)
-          {
-            ApplyFileAdditionWithReturn(level_per_segment_level-1-i-1,**it1,*it1);
-            (*final_new_filelist)[i+1].emplace_back(*it1);
-            //key_range[i+1].second=(*it1)->largest;
-            it1++;
-            if(i+1>upper)
-            {
-              upper++;
+  void CreateSegmentsForSeparateFiles(
+      std::vector<std::pair<FileMetaData*, int>>&
+          files_not_overlap_with_segment,
+      VersionStorageInfo* vstorage, size_t level, size_t& add_file_index,
+      const std::vector<int>& ordered_add_files,
+      const InternalKeyComparator* icmp, bool last = false) const {
+    const auto& added_files_in_order = levels_[level].added_files_in_order;
+    auto now_added_file_id = ordered_add_files[add_file_index];
+    auto added_file = added_files_in_order[now_added_file_id];
+    if (!files_not_overlap_with_segment.empty()) {
+      if (last ||
+          icmp->Compare(
+              added_files_in_order[ordered_add_files[add_file_index - 1]]
+                  ->largest,
+              added_file->smallest) < 0) {
+        auto new_segment =
+            CreateSegment(files_not_overlap_with_segment, 0,
+                          files_not_overlap_with_segment.size(), icmp);
+        vstorage->AddSegment(level, new_segment);
+        files_not_overlap_with_segment.clear();
+      }
+    }
+    // add file to list files_not_overlap_with_segment
+    if (!last) {
+      files_not_overlap_with_segment.emplace_back(added_file,
+                                                  -now_added_file_id);
+    }
+  }
+
+  void MergeAndSplitSegments(VersionStorageInfo* vstorage,
+                             std::vector<Segment*>& base_segments, size_t level,
+                             const std::vector<uint64_t>& new_files_in_top,
+                             const std::vector<uint64_t>& new_files_in_bottom,
+                             const InternalKeyComparator* cmp) const {
+    auto deleted_files = levels_[level].deleted_files;
+    auto add_files = levels_[level].added_files;
+    auto add_files_in_order = levels_[level].added_files_in_order;
+    std::vector<std::pair<FileMetaData*, int>> files;
+    size_t max_level = 0;
+    // flatten all files
+    for (auto segment : base_segments) {
+      for (size_t i = 0; i < segment->files_.size(); ++i) {
+        for (auto file : segment->files_[i]) {
+          if (deleted_files.find(file->fd.GetNumber()) != deleted_files.end()) {
+            vstorage->RemoveCurrentStats(file);
+          } else {
+            auto add_it = add_files.find(file->fd.GetNumber());
+            if (add_it != add_files.end() && add_it->second != file) {
+              // added file override base file
+              vstorage->RemoveCurrentStats(file);
+              continue;
             }
+            else {
+              files.emplace_back(file, (int)i);
+              max_level = std::max(max_level, i);
+            }
+          }
+        }
+      }
+    }
+    for (size_t i = 0; i < new_files_in_top.size(); ++i) {
+      auto& new_file = add_files_in_order[new_files_in_top[i]];
+      files.emplace_back(new_file, -1 - i);
+    }
+    // for every segment, it should be only one sorted run insert to bottom
+    for (size_t i = 0; i < new_files_in_bottom.size(); ++i) {
+      auto& new_file = add_files_in_order[new_files_in_bottom[i]];
+      files.emplace_back(new_file, max_level + 1);
+    }
+    std::sort(files.begin(), files.end(),
+              [&](const std::pair<FileMetaData*, int>& a,
+                  const std::pair<FileMetaData*, int>& b) {
+                return (*level_nonzero_cmp_)(a.first, b.first);
+              });
+    // split segments
+    size_t begin = 0;
+    for (size_t i = 1; i < files.size(); ++i) {
+      auto& prev_file = files[i - 1];
+      auto& now_file = files[i];
+      if (cmp->Compare(prev_file.first->largest, now_file.first->smallest) <
+          0) {
+        // no overlap, split here
+        auto new_segment = CreateSegment(files, begin, i, cmp);
+        vstorage->AddSegment(level, new_segment);
+        begin = i;
+      }
+    }
+    // last segment
+    auto new_segment = CreateSegment(files, begin, files.size(), cmp);
+    vstorage->AddSegment(level, new_segment);
+  }
+
+  void SaveSegmentsTo(VersionStorageInfo* vstorage, size_t level) const {
+    const auto& base_segments = base_vstorage_->GetLevelSegments(level);
+    auto icmp = vstorage->InternalComparator();
+    const auto& del_files = levels_[level].deleted_files;
+    const auto& added_files_in_order = levels_[level].added_files_in_order;
+    const auto& added_files_sign = levels_[level].compaction_added_files_sign;
+
+    bool changed[base_segments.size()];
+    // find all segments has deletion file
+    for (auto i : del_files) {
+      auto segment_id = vstorage->GetFileInWhichSegment(i);
+      auto segment_loc = vstorage->GetSegmentLocationById(segment_id);
+      changed[segment_loc.GetPosition()] = true;
+    }
+
+    // sort added files by begin key
+    std::vector<int> ordered_add_files(added_files_in_order.size());
+    for (size_t i = 0; i < added_files_in_order.size(); i++) {
+      ordered_add_files[i] = i;
+    }
+    std::sort(ordered_add_files.begin(), ordered_add_files.end(),
+              [&](int a, int b) {
+                return (*level_nonzero_cmp_)(added_files_in_order[a],
+                                             added_files_in_order[b]);
+              });
+    // merge added files and base segments
+    size_t add_file_index = 0;
+    bool should_merge_next = false;
+    std::vector<Segment*> segments_to_change;
+    std::vector<uint64_t> new_files_in_top;
+    std::vector<uint64_t> new_files_in_bottom;
+    std::vector<std::pair<FileMetaData*, int>> files_not_overlap_with_segment;
+    for (size_t i = 0; i < base_segments.size(); ++i) {
+      while (add_file_index < ordered_add_files.size()) {
+        auto now_added_file_id = ordered_add_files[add_file_index];
+        auto added_file = added_files_in_order[now_added_file_id];
+        InternalKey segment_smallest_key = base_segments[i]->smallest;
+        InternalKey segment_largest_key = base_segments[i]->largest;
+
+        // before segment range
+        if (icmp->Compare(added_file->largest, segment_smallest_key) < 0) {
+          // if not overlap with previous added files
+          // create segment for previous added files
+          CreateSegmentsForSeparateFiles(files_not_overlap_with_segment,
+                                         vstorage, level, add_file_index,
+                                         ordered_add_files, icmp);
+        } else {
+          // create segment for previous added files not overlap with segment
+          CreateSegmentsForSeparateFiles(
+              files_not_overlap_with_segment, vstorage, level, add_file_index,
+              ordered_add_files, icmp, /* last */ true);
+
+          // overlap with segment
+          if (icmp->Compare(added_file->smallest, segment_largest_key) < 0) {
+            // add into file list ready to insert into segment
+            if (added_files_sign[now_added_file_id]) {
+              new_files_in_bottom.push_back(now_added_file_id);
+            } else {
+              new_files_in_top.push_back(now_added_file_id);
+            }
+            // check whether need merge with next segment
+            if (i + 1 < base_segments.size()) {
+              if (icmp->Compare(added_file->largest,
+                                base_segments[i + 1]->smallest) > 0) {
+                // need merge with next segment
+                should_merge_next = true;
+              }
+            }
+            changed[i] = true;
+          } else if (icmp->Compare(added_file->largest, segment_largest_key) >
+                     0) {
+            // out of segment range
             break;
           }
         }
+        add_file_index++;
       }
-      if(i==0)
-      {
-        ApplyFileAdditionWithReturn(level_per_segment_level-1-i-1,**it1,*it1);
-          (*final_new_filelist)[i+1].emplace_back(*it1);
-          it1++;
-          if(i+1>upper)
-          {
-            upper++;
-          }
-          break;
-      }
-    }
-  }
-}
-  void SaveSegmentsTo(VersionStorageInfo* vstorage)
-{
-    //assert(vstorage);
-    std::vector<std::vector<Segment*>> base_segment_trush(base_segment_);
-    const InternalKeyComparator* cmp_=base_vstorage_->InternalComparator();
-    auto ucmp=cmp_->user_comparator();
-    auto pair_comp_for_files = [&](const auto& a, const auto& b)
-    {
-      int comp_result = ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()), ExtractUserKey(b->smallest.Encode()));
-      return comp_result<=0;
-    };
-    auto pair_comp_for_l0_files_seg=[&](const auto& a, const auto& b)
-    {
-      int comp_result1=ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()),ExtractUserKey(b->largest.Encode()));
-      int comp_result2=ucmp->CompareWithoutTimestamp(ExtractUserKey(b->smallest.Encode()),ExtractUserKey(a->largest.Encode()));
-      if(comp_result1>0||comp_result2>0)
-      {
-        //return ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()),ExtractUserKey(b->smallest.Encode()))<=0;
-        return comp_result1<=0;
-      }
-      else
-      {
-        if (a->fd.largest_seqno != b->fd.largest_seqno)
-        {
-          return a->fd.largest_seqno > b->fd.largest_seqno;
-        }
-        if (a->fd.smallest_seqno != b->fd.smallest_seqno)
-        {
-          return a->fd.smallest_seqno > b->fd.smallest_seqno;
-        }
-        return a->fd.GetNumber() > b->fd.GetNumber();
-      }
-    };
-    auto pair_comp_for_l0_files_epoch=[&](const auto& a, const auto& b)
-    {
-      int comp_result1=ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()),ExtractUserKey(b->largest.Encode()));
-      int comp_result2=ucmp->CompareWithoutTimestamp(ExtractUserKey(b->smallest.Encode()),ExtractUserKey(a->largest.Encode()));
-      if(comp_result1>0||comp_result2>0)
-      {
-        return ucmp->CompareWithoutTimestamp(ExtractUserKey(a->smallest.Encode()),ExtractUserKey(b->smallest.Encode()))<=0;
-      }
-      else
-      {
-        if (a->epoch_number != b->epoch_number)
-        {
-          return a->epoch_number > b->epoch_number;
-        } else
-        {
-          if (a->fd.largest_seqno != b->fd.largest_seqno)
-          {
-            return a->fd.largest_seqno > b->fd.largest_seqno;
-          }
-          if (a->fd.smallest_seqno != b->fd.smallest_seqno)
-          {
-            return a->fd.smallest_seqno > b->fd.smallest_seqno;
-          }
-          return a->fd.GetNumber() > b->fd.GetNumber();
-        }
-      }
-    };
-    for(int i=0;i<base_vstorage_->NumSegmentLevel();i++)
-    {
-      if(i==0)
-      {
-        EpochNumberRequirement epoch_number_requirement =
-        vstorage->GetEpochNumberRequirement();
-        if (epoch_number_requirement == EpochNumberRequirement::kMightMissing)
-        {
-          bool promoted = PromoteEpochNumberRequirementIfNeeded(vstorage);
-          if (promoted)
-          {
-            epoch_number_requirement = vstorage->GetEpochNumberRequirement();
-          }
-        }
-        if (epoch_number_requirement == EpochNumberRequirement::kMightMissing)
-        {
-          std::sort(levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin(),levels_[(i+1)*level_per_segment_level-1].middle_added_files.end(),pair_comp_for_l0_files_seg);
-        }
-        else
-        {
-          std::sort(levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin(),levels_[(i+1)*level_per_segment_level-1].middle_added_files.end(),pair_comp_for_l0_files_epoch);
-        }
-        //std::sort(levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin(),levels_[(i+1)*level_per_segment_level-1].middle_added_files.end(),pair_comp_for_files);
-        std::vector<FileMetaData*>& filelist=levels_[(i+1)*level_per_segment_level-1].middle_added_files;
-        std::vector<Segment*>& level_segments=*base_vstorage_->GetLevelSegments(i);
-        //std::sort(levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin(),levels_[i].middle_added_files.end(),pair_comp_for_files);
-        auto input_it=levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin();
-        auto input_it_end=levels_[(i+1)*level_per_segment_level-1].middle_added_files.end();
-        int middle=0;
-        int position=-1;
-        int total=0;
-        auto segment_it=level_segments.begin();
-        auto segment_it_end=level_segments.end();
-        std::vector<Segment*> overlapping_segments;
-        std::vector<FileMetaData*> new_file_list;
-        InternalKey input_smallest;
-        InternalKey input_largest;
-        InternalKey segment_smallest;
-        InternalKey segment_largest;
-        bool has_updated=false;
-        bool should_retry=true;
-        int num_of_merge_level=0;
-        int first_segment=0;
-        int last_segment=0;
-        new_file_list.clear();
-        while(input_it!=input_it_end)
-        {
-          for(int j=i*level_per_segment_level;j<(i+1)*level_per_segment_level;j++)
-          {
-            levels_[j].final_added_files.clear();
-          }
-          position=-1;
-          total=0;
-          has_updated=false;
-          overlapping_segments.clear();
-          new_file_list.clear();
-          new_file_list.emplace_back(*input_it);
-          input_smallest=(*input_it)->smallest;
-          input_largest=(*input_it)->largest;
-          input_it++;
-          while(should_retry)
-          {
-            should_retry=false;
-            while(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->smallest.Encode()),ExtractUserKey(input_largest.Encode()))>0||ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->largest.Encode()),ExtractUserKey(input_smallest.Encode()))<0)&&input_it!=input_it_end)
-            {
-              new_file_list.emplace_back(*input_it);
-              input_largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(input_largest.Encode()),ExtractUserKey((*input_it)->largest.Encode()))>=0?input_largest:(*input_it)->largest;
-              input_it++;
-            }
-            while (segment_it!=segment_it_end)
-            {
-              Segment* exiting_segments=*segment_it;
-              auto it=deleted_segments_map.find(exiting_segments->GetSegmentNum());
-              if(it!=deleted_segments_map.end())
-              {
-                if(it->second==true)
-                {
-                  for(auto fll:exiting_segments->get_files())
-                  {
-                    for(auto& f:fll)
-                    {
-                      vstorage->RemoveCurrentStats(f);
-                    }
-                  }
-                }
-                middle++;
-                segment_it++;
-                continue;
-              }
-              int first_overlapping_result= ucmp->CompareWithoutTimestamp(ExtractUserKey(input_largest.Encode()), ExtractUserKey(exiting_segments->smallest.Encode()));
-              int second_overlapping_result=ucmp->CompareWithoutTimestamp(ExtractUserKey(exiting_segments->largest.Encode()),ExtractUserKey(input_smallest.Encode()));
-              bool not_overlaps =first_overlapping_result < 0 ||second_overlapping_result < 0;
-              if (!not_overlaps)
-              {
-                if(position==-1)
-                {
-                  position=middle;
-                  last_segment=middle;
-                }
-                total++;
-                overlapping_segments.emplace_back(exiting_segments);
-                segment_it++;
-                if(has_updated==false)
-                {
-                  segment_smallest=exiting_segments->smallest;
-                  has_updated=true;
-                }
-                segment_largest=exiting_segments->largest;
-                middle++;
-                continue;
-              }
-              if(first_overlapping_result<0)
-              {
-                break;
-              }
-              segment_it++;
-              middle++;
-            }
-            if(position==-1)
-            {
-
-            }
-            else
-            {
-              while(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->smallest.Encode()),ExtractUserKey(segment_largest.Encode()))>0||ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->largest.Encode()),ExtractUserKey(segment_smallest.Encode()))<0)&&input_it!=input_it_end)
-              {
-                should_retry=true;
-                new_file_list.emplace_back(*input_it);
-                input_largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(input_largest.Encode()),ExtractUserKey((*input_it)->largest.Encode()))>=0?input_largest:(*input_it)->largest;
-                input_it++;
-              }
-            }
-          }
-          //std::sort(new_file_list.begin(),new_file_list.end(),pair_comp_for_l0_files);
-          if(total==0)
-          {
-            if(first_segment<middle)
-            {
-              for(int j=first_segment;j<middle;j++)
-              {
-                auto it=deleted_segments_map.find(level_segments[j]->GetSegmentNum());
-                if(it==deleted_segments_map.end())
-                {
-                  vstorage->AddSegments(i,level_segments[j],cmp_);
-                  level_segments[j]->refs.fetch_add(1);
-                }
-                else
-                {
-                  if(it->second==true)
-                  {
-
-                  }
-                  else
-                  {
-                    std::vector<std::vector<FileMetaData*>> new_segment_filelist((level_segments[j]->get_files()));
-                    std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-                    new_segment_filelist.resize(level_per_segment_level);
-                    final_new_segment_filelist->resize(level_per_segment_level);
-                    int judge_level=level_per_segment_level-1;
-                    while(judge_level!=-1)
-                    {
-                      if(!new_segment_filelist[judge_level].empty())
-                      {
-                        break;
-                      }
-                      judge_level--;
-                    }
-                    auto final_filelist=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-                    for(auto fl:final_filelist)
-                    {
-                      Segment* new_segment=new Segment(final_new_segment_filelist,cmp_);
-                      new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                      new_segment->refs=1;
-                      vstorage->AddSegments(i,new_segment,cmp_);
-                    }
-                  }
-                }
-              }
-            }
-            first_segment=middle;
-            std::vector<std::vector<FileMetaData*>>* new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-            new_segment_filelist->resize(level_per_segment_level);
-            AddFileForEmptyL0Segment(new_segment_filelist,new_file_list,cmp_);
-            Segment* new_segment=new Segment(new_segment_filelist,cmp_);
-            new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-            new_segment->refs=1;
-            vstorage->AddSegments(i,new_segment,cmp_);
-          }
-          else
-          {
-            for(int j=first_segment;j<last_segment;j++)
-            {
-              auto it=deleted_segments_map.find(level_segments[j]->GetSegmentNum());
-              if(it==deleted_segments_map.end())
-              {
-                vstorage->AddSegments(i,level_segments[j],cmp_);
-                level_segments[j]->refs.fetch_add(1);
-              }
-              else
-              {
-                if(it->second==true)
-                {
-
-                }
-                else
-                {
-                  std::vector<std::vector<FileMetaData*>> new_segment_filelist((level_segments[j]->get_files()));
-                  std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-                  //new_segment_filelist.resize(level_per_segment_level);
-                  final_new_segment_filelist->resize(level_per_segment_level);
-                  int judge_level=level_per_segment_level-1;
-                  while(judge_level!=-1)
-                  {
-                    if(!new_segment_filelist[judge_level].empty())
-                    {
-                      break;
-                    }
-                  judge_level--;
-                  }
-                  auto final_filelist=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-                  for(auto fl:final_filelist)
-                  {
-                    Segment* new_segment=new Segment(final_new_segment_filelist,cmp_);
-                    new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                    new_segment->refs=1;
-                    vstorage->AddSegments(i,new_segment,cmp_);
-                  }
-                }
-              }
-            }
-            first_segment=last_segment+total;
-            std::vector<std::vector<FileMetaData*>> new_segment_filelist(overlapping_segments[0]->get_files());
-            int segment_not_empty_level=0;
-            int judge_level=level_per_segment_level-1;
-            while(judge_level!=-1)
-            {
-              if(!new_segment_filelist[judge_level].empty())
-              {
-                segment_not_empty_level=judge_level;
-                break;
-              }
-              judge_level--;
-            }
-            //std::vector<int> file_input_level;
-            //file_input_level.resize(static_cast<int>(new_file_list.size()),0);
-            new_segment_filelist.resize(level_per_segment_level);
-            std::unordered_map<int,bool>::iterator itm;
-            for(int j=1;j<static_cast<int>(overlapping_segments.size());j++)
-            {
-              //itm=deleted_segments_map.find(overlapping_segments[j]->GetSegmentNum());
-              //if(itm!=deleted_segments_map.end())
-              //{
-                //if(itm->second!=true)
-                //{
-                  //AppendFileListAtLast(new_segment_filelist,overlapping_segments[j]->get_files());
-                //}
-                //else
-                //{
-                  //for(auto fll:overlapping_segments[j]->get_files())
-                  //{
-                    //for(auto& f:fll)
-                    //{
-                      //vstorage->RemoveCurrentStats(f);
-                    //}
-                  //}
-                //}
-                //continue;
-              //}
-              AppendFileListAtLast(new_segment_filelist,overlapping_segments[j]->get_files());
-            }
-            int max_level=GetL0InputLevel(new_segment_filelist,new_file_list,cmp_,segment_not_empty_level);
-            max_level=std::max(max_level,judge_level);
-            std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-            final_new_segment_filelist->resize(level_per_segment_level);
-            auto fs=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-            for(auto fl:fs)
-            {
-              Segment* new_segment=new Segment(fl,cmp_);
-              new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-              new_segment->refs=1;
-              vstorage->AddSegments(i,new_segment,cmp_);
-            }
-          }
-        }
-        for(int j=i*level_per_segment_level;j<(i+1)*level_per_segment_level;j++)
-        {
-          levels_[j].final_added_files.clear();
-        }
-        while(segment_it!=segment_it_end)
-        {
-          auto it=deleted_segments_map.find((*segment_it)->GetSegmentNum());
-          if(it==deleted_segments_map.end())
-          {
-            vstorage->AddSegments(i,*segment_it,cmp_);
-            (*segment_it)->refs.fetch_add(1);
-          }
-          else
-          {
-            if(it->second==true)
-            {
-
-            }
-            else
-            {
-              std::vector<std::vector<FileMetaData*>> new_segment_filelist(((*segment_it)->get_files()));
-              std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-              //new_segment_filelist.resize(level_per_segment_level);
-              final_new_segment_filelist->resize(level_per_segment_level);
-              int judge_level=level_per_segment_level-1;
-              while(judge_level!=-1)
-              {
-                if(!new_segment_filelist[judge_level].empty())
-                {
-                  break;
-                }
-                judge_level--;
-              }
-              auto fs=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-              for(auto fl:fs)
-              {
-                Segment* new_segment=new Segment(fl,cmp_);
-                new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                new_segment->refs=1;
-                vstorage->AddSegments(i,new_segment,cmp_);
-              }
-            }
-          }
-        }
-      }
-      else
-      {
-        std::sort(levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin(),levels_[(i+1)*level_per_segment_level-1].middle_added_files.end(),pair_comp_for_files);
-        std::vector<FileMetaData*>& filelist=levels_[(i+1)*level_per_segment_level-1].middle_added_files;
-        std::vector<Segment*>& level_segments=*base_vstorage_->GetLevelSegments(i);
-        //std::sort(levels_[i].middle_added_files.begin(),levels_[i].middle_added_files.end(),pair_comp_for_files);
-        auto input_it=levels_[(i+1)*level_per_segment_level-1].middle_added_files.begin();
-        auto input_it_end=levels_[(i+1)*level_per_segment_level-1].middle_added_files.end();
-        int middle=-1;
-        int position=-1;
-        int total=0;
-        auto segment_it=level_segments.begin();
-        auto segment_it_end=level_segments.end();
-        std::vector<Segment*> overlapping_segments;
-        std::vector<FileMetaData*> new_file_list;
-        InternalKey input_smallest;
-        InternalKey input_largest;
-        InternalKey segment_smallest;
-        InternalKey segment_largest;
-        bool has_updated=false;
-        bool should_retry=true;
-        int num_of_merge_level=0;
-        int last_segment=0;
-        int first_segment=0;
-        new_file_list.clear();
-        while(input_it!=input_it_end)
-        {
-          for(int j=i*level_per_segment_level;j<(i+1)*level_per_segment_level;j++)
-          {
-            levels_[j].final_added_files.clear();
-          }
-          position=-1;
-          total=0;
-          has_updated=false;
-          overlapping_segments.clear();
-          new_file_list.clear();
-          new_file_list.emplace_back(*input_it);
-          input_smallest=(*input_it)->smallest;
-          input_largest=(*input_it)->largest;
-          input_it++;
-          while(should_retry)
-          {
-            should_retry=false;
-            while (segment_it!=segment_it_end)
-            {
-              Segment* exiting_segments=*segment_it;
-              auto it=deleted_segments_map.find(exiting_segments->GetSegmentNum());
-              if(it!=deleted_segments_map.end())
-              {
-                if(it->second==true)
-                {
-                  for(auto fll:exiting_segments->get_files())
-                  {
-                    for(auto& f:fll)
-                    {
-                      vstorage->RemoveCurrentStats(f);
-                    }
-                  }
-                }
-                middle++;
-                segment_it++;
-                continue;
-              }
-              int first_overlapping_result= ucmp->CompareWithoutTimestamp(ExtractUserKey(input_largest.Encode()), ExtractUserKey(exiting_segments->smallest.Encode()));
-              int second_overlapping_result=ucmp->CompareWithoutTimestamp(ExtractUserKey(exiting_segments->largest.Encode()),ExtractUserKey(input_smallest.Encode()));
-              bool not_overlaps =first_overlapping_result < 0 ||second_overlapping_result < 0;
-              if (!not_overlaps)
-              {
-                if(position==-1)
-                {
-                  position=middle;
-                  last_segment=middle;
-                }
-                total++;
-                overlapping_segments.emplace_back(exiting_segments);
-                segment_it++;
-                if(has_updated==false)
-                {
-                  segment_smallest=exiting_segments->smallest;
-                  has_updated=true;
-                }
-                segment_largest=exiting_segments->largest;
-                middle++;
-                continue;
-              }
-              if(first_overlapping_result<0)
-              {
-                break;
-              }
-              segment_it++;
-              middle++;
-            }
-            if(position==-1)
-            {
-
-            }
-            else
-            {
-              while(!(ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->smallest.Encode()),ExtractUserKey(segment_largest.Encode()))>0||ucmp->CompareWithoutTimestamp(ExtractUserKey((*input_it)->largest.Encode()),ExtractUserKey(segment_smallest.Encode()))<0)&&input_it!=input_it_end)
-              {
-                should_retry=true;
-                new_file_list.emplace_back(*input_it);
-                input_largest=(*input_it)->largest;
-                //input_largest=ucmp->CompareWithoutTimestamp(ExtractUserKey(input_largest.Encode()),ExtractUserKey((*input_it)->largest.Encode()))>=0?input_largest:(*input_it)->largest;
-                input_it++;
-              }
-            }
-          }
-          if(total==0)
-          {
-            if(first_segment<middle)
-            {
-              for(int j=first_segment;j<middle;j++)
-              {
-                auto it=deleted_segments_map.find(level_segments[j]->GetSegmentNum());
-                if(it==deleted_segments_map.end())
-                {
-                  vstorage->AddSegments(i,level_segments[j],cmp_);
-                  level_segments[j]->refs.fetch_add(1);
-                }
-                else
-                {
-                  if(it->second==true)
-                  {
-
-                  }
-                  else
-                  {
-                    std::vector<std::vector<FileMetaData*>> new_segment_filelist((level_segments[j]->get_files()));
-                    std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-                    //new_segment_filelist.resize(level_per_segment_level);
-                    final_new_segment_filelist->resize(level_per_segment_level);
-                    int judge_level=level_per_segment_level-1;
-                    while(judge_level!=-1)
-                    {
-                      if(!new_segment_filelist[judge_level].empty())
-                      {
-                        break;
-                      }
-                      judge_level--;
-                    }
-                    auto final_filelist=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-                    for(auto fl:final_filelist)
-                    {
-                      Segment* new_segment=new Segment(final_new_segment_filelist,cmp_);
-                      new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                      new_segment->refs=1;
-                      vstorage->AddSegments(i,new_segment,cmp_);
-                    }
-                  }
-                }
-              }
-            }
-            first_segment=middle;
-            for(auto& file:new_file_list)
-            {
-              std::vector<std::vector<FileMetaData*>>* new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-              new_segment_filelist->resize(level_per_segment_level);
-              (*new_segment_filelist)[0].emplace_back(file);
-              file->refs++;
-              Segment* new_segment=new Segment(new_segment_filelist,cmp_);
-              new_segment->refs=1;
-              new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-              vstorage->AddSegments(i,new_segment,cmp_);
-            }
-          }
-          else
-          {
-            for(int j=first_segment;j<last_segment;j++)
-            {
-              auto it=deleted_segments_map.find(level_segments[j]->GetSegmentNum());
-              if(it==deleted_segments_map.end())
-              {
-                vstorage->AddSegments(i,level_segments[j],cmp_);
-                level_segments[j]->refs.fetch_add(1);
-              }
-              else
-              {
-                if(it->second==true)
-                {
-
-                }
-                else
-                {
-                  std::vector<std::vector<FileMetaData*>> new_segment_filelist((level_segments[j]->get_files()));
-                  std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-                  //new_segment_filelist.resize(level_per_segment_level);
-                  final_new_segment_filelist->resize(level_per_segment_level);
-                  int judge_level=level_per_segment_level-1;
-                  while(judge_level!=-1)
-                  {
-                    if(!new_segment_filelist[judge_level].empty())
-                    {
-                      break;
-                    }
-                    judge_level--;
-                  }
-                  auto final_filelist=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-                  for(auto fl:final_filelist)
-                  {
-                    Segment* new_segment=new Segment(final_new_segment_filelist,cmp_);
-                    new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                    new_segment->refs=1;
-                    vstorage->AddSegments(i,new_segment,cmp_);
-                  }
-                }
-              }
-            }
-            first_segment=last_segment+total;
-            std::vector<std::vector<FileMetaData*>> new_segment_filelist(overlapping_segments[0]->get_files());
-            int segment_not_empty_level=0;
-            int judge_level=level_per_segment_level-1;
-            while(judge_level!=-1)
-            {
-              if(!new_segment_filelist[judge_level].empty())
-              {
-                segment_not_empty_level=judge_level;
-                break;
-              }
-              judge_level--;
-            }
-            if(judge_level==-1)
-            {
-              segment_not_empty_level=0;
-            }
-            //std::vector<int> file_input_level;
-            //file_input_level.resize(static_cast<int>(new_file_list.size()),0);
-            //new_segment_filelist.resize(level_per_segment_level);
-            std::unordered_map<int,bool>::iterator itm;
-            for(int j=1;j<static_cast<int>(overlapping_segments.size());j++)
-            {/*
-              itm=deleted_segments_map.find(overlapping_segments[j]->GetSegmentNum());
-              if(itm!=deleted_segments_map.end())
-              {
-                if(itm->second!=true)
-                {
-                  AppendFileListAtLast(new_segment_filelist,overlapping_segments[j]->get_files());
-                }
-                else
-                {
-                  for(auto fll:overlapping_segments[j]->get_files())
-                  {
-                    for(auto& f:fll)
-                    {
-                      vstorage->RemoveCurrentStats(f);
-                    }
-                  }
-                }
-                continue;
-              }
-                */
-              AppendFileListAtLast(new_segment_filelist,overlapping_segments[j]->get_files());
-            }
-            int max_level=GetInputLevel(new_segment_filelist,new_file_list,cmp_,segment_not_empty_level,i);
-            max_level=std::max(max_level,judge_level);
-            std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-            final_new_segment_filelist->resize(level_per_segment_level);
-            auto fs=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-            for(auto fl:fs)
-            {
-              Segment* new_segment=new Segment(fl,cmp_);
-              new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-              new_segment->refs=1;
-              vstorage->AddSegments(i,new_segment,cmp_);
-            }
-          }
-        }
-        for(int j=i*level_per_segment_level;j<(i+1)*level_per_segment_level;j++)
-        {
-          levels_[j].final_added_files.clear();
-        }
-        while(segment_it!=segment_it_end)
-        {
-          auto it=deleted_segments_map.find((*segment_it)->GetSegmentNum());
-          if(it==deleted_segments_map.end())
-          {
-            vstorage->AddSegments(i,*segment_it,cmp_);
-            (*segment_it)->refs.fetch_add(1);
-          }
-          else
-          {
-            if(it->second==true)
-            {
-
-            }
-            else
-            {
-              std::vector<std::vector<FileMetaData*>> new_segment_filelist(((*segment_it)->get_files()));
-              std::vector<std::vector<FileMetaData*>>* final_new_segment_filelist=new std::vector<std::vector<FileMetaData*>>;
-              new_segment_filelist.resize(level_per_segment_level);
-              final_new_segment_filelist->resize(level_per_segment_level);
-              int judge_level=level_per_segment_level-1;
-              while(judge_level!=-1)
-              {
-                if(!new_segment_filelist[judge_level].empty())
-                {
-                  break;
-                }
-                judge_level--;
-              }
-              auto fs=AddFileForSegment(vstorage,i,final_new_segment_filelist,new_segment_filelist,judge_level,cmp_);
-              for(auto fl:fs)
-              {
-                Segment* new_segment=new Segment(fl,cmp_);
-                new_segment->UpdateSegmentNum(version_set_->NewSegmentNumber());
-                new_segment->refs=1;
-                vstorage->AddSegments(i,new_segment,cmp_);
-              }
-            }
-          }
-        }
-      }
-    }
-    vstorage->AddFilesAfterSegment();
-
-
-
-/*
-    std::vector<std::vector<int>> deleted_segment_list;
-    deleted_segment_list.reserve(base_vstorage_->NumSegmentLevel());
-    std::vector<int> l0_file_input_level;
-    for(int i=0;i<base_vstorage_->num_levels();i*=level_per_segment_level)
-    {
-      if(i==0)
-      {
-        std::sort(levels_[i].middle_added_files.begin(),levels_[i].middle_added_files.end(),pair_comp_for_l0_files);
-        l0_file_input_level.reserve(levels_[i].middle_added_files.size());
-        AddFileForL0Segments(i/level_per_segment_level,levels_[i].middle_added_files,cmp_,deleted_segment_list[i],l0_file_input_level);
-
-      }
-      else
-      {
-        std::sort(levels_[i].middle_added_files.begin(),levels_[i].middle_added_files.end(),pair_comp_for_files);
-        AddFileForSegments(i/level_per_segment_level,levels_[i].middle_added_files,cmp_,deleted_segment_list[i]);
-      }
-    }
-    for(int level=0;level<num_levels_;level++)进行基础插入
-    {
-      auto& base_segments = base_segment_[level];
-      std::vector<Segment*> base_segments_copy(base_segments);
-      //auto& added_files = levels_[level].added_files_for_judge;
-      //auto& added_segments=levels_[level].added_segments_by_changed;
-      auto& deleted_segments_map=levels_[level].deleted_segments;
-      auto& deleted_segments_caused_trush=levels_[level].deleted_segments_caused_trush;
-      std::vector<Segment*> deleted_segments;
-      for(auto& s:deleted_segments_map)
-      {
-        deleted_segments.emplace_back(s.second);
-      }
-      for(auto& s:deleted_segments_caused_trush)
-      {
-        deleted_segments.emplace_back(s.second);
-      }
-      //std::sort(added_files.begin(),added_files.end(), pair_comp_for_files);
-      std::sort(base_segments_copy.begin(),base_segments_copy.end(),pair_comp_for_basesegments);
-      //std::sort(added_segments.begin(), added_segments.end(), pair_comp_for_segments);
-      std::sort(deleted_segments.begin(), deleted_segments.end(), pair_comp_for_basesegments);
-      //int added_it=0;
-      int deleted_it=0;
-      int base_it=0;
-      //int added_final=added_segments.size();
-      int base_final=base_segments_copy.size();
-      //vstorage->ReserveForSegments(level, base_segments.size() + added_segments.size());
-      while(base_it<base_final)
-      {
-        if(*base_segments_copy[base_it]!=*deleted_segments[deleted_it])
-        {
-          //base_segments_copy[base_it]->MakeActualDelete(cmp_);
-          if(base_segments_copy[base_it]->IsEmpty())
-          {
-            continue;
-          }
-          std::pair<int,int> level_for_segment=GetLevelForSegment(level);
-          for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
-          {
-            base_segments_copy[base_it]->RecordFileDeletion(levels_[i].deleted_files_for_judge);
-            if(base_segments_copy[base_it]->NeedClearEmptyLevel(level_per_segment_level,0))
-            {
-              std::vector<std::tuple<FileMetaData*,int,int>> filelist=base_segments_copy[base_it]->MakeActualDeleteAndReturn(cmp_);
-              for(auto& t:filelist)
-              {
-                ApplySegmentFileDeletion(std::get<0>(t),i,std::get<1>(t));
-                ApplyFileAddition((((i+1)*level_per_segment_level)-1)-std::get<2>(t),std::get<0>(t));
-                files_may_caused_trush.emplace(std::get<0>(t)->fd.GetNumber(),(((i+1)*level_per_segment_level)-1)-std::get<2>(t));
-                added_files_by_segment_.emplace(std::get<0>(t)->fd.GetNumber(),(((i+1)*level_per_segment_level)-1)-std::get<2>(t));
-                //levels_[(((i+1)*level_per_segment_level)-1)-std::get<1>(t)].deleted_files.emplace(std::get<0>(t)->fd.GetNumber());
-                //levels_[(((i+1)*level_per_segment_level)-1)-std::get<2>(t)].added_files.emplace(std::get<0>(t)->fd.GetNumber());
-              }
-            }
-            else
-            {
-              base_segments_copy[base_it]->MakeActualDelete(cmp_);
-            }
-            //base_segments_copy[base_it]->UpdateSegmentIsChanged();
-          }
-          AddSegments(level, new Segment(*base_segments_copy[base_it]),cmp_);
-          base_it++;
-        }
-        else
-        {
-          deleted_it++;
-          base_it++;
-        }
-      }
-      for(auto& deleted_segment:deleted_segments)
-      {
-        std::pair<int,int> level_for_segment=GetLevelForSegment(level);
-        for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
-        {
-          deleted_segment->RecordFileDeletion(levels_[level].deleted_files_for_judge);
-          std::vector<std::pair<FileMetaData*,int>> filelist=deleted_segment->MakeActualDeleteWithMiddleReturn(cmp_);
-          for(auto& p:filelist)
-          {
-            ApplySegmentFileDeletion(p.first,level,p.second);
-          }
-        }
-      }
-  }
-  //for(int level=0;level<num_levels_;level++)
-  {
-    auto& deleted_segments_map=levels_[level].deleted_segments;
-    auto& deleted_segments_caused_trush=levels_[level].deleted_segments_caused_trush;
-    std::vector<Segment*> deleted_segments;
-    for(auto& s:deleted_segments_map)
-    {
-      deleted_segments.emplace_back(s.second);
-    }
-    for(auto&s:deleted_segments_caused_trush)
-    {
-      deleted_segments.emplace_back(s.second);
-    }
-    for(auto& deleted_segment:deleted_segments)
-    {
-      std::pair<int,int> level_for_segment=GetLevelForSegment(level);
-      for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
-      {
-        deleted_segment->RecordFileDeletion(levels_[level].deleted_files_for_judge);
-        std::vector<std::pair<FileMetaData*,int>> filelist=deleted_segment->MakeActualDeleteWithMiddleReturn(cmp_);
-        for(auto& p:filelist)
-        {
-          ApplySegmentFileDeletion(p.first,level,p.second);
-        }
-      }
-    }
-  }
-  for(int level=0;level<num_levels_;level++)
-  //{
-      //auto& base_segments = base_vstorage_->LevelSegments(level);
-      //auto& added_files = levels_[level].added_files_for_judge;
-      //auto& added_segment_map=levels_[level].added_segments;
-      //std::vector<Segment*> added_segments;
-      //for(auto& f:added_segment_map)
-      //{
-        //added_segments.emplace_back(f.second);
-      //}
-      //auto& deleted_segments=levels_[level].deleted_segments;
-      //std::sort(added_files.begin(),added_files.end(), pair_comp_for_files);
-      //std::sort(base_segments.begin(),base_segments.end(),pair_comp_for_segments);
-      //std::sort(added_segments.begin(), added_segments.end(), pair_comp_for_basesegments);
-      //std::sort(deleted_segments.begin(), deleted_segments.end(), pair_comp_for_segments);
-      //for(auto& added_segment:added_segments)
-      //{
-        //int level_=added_segments.find(deleted_segment.second)->second;
-        //std::pair<int,int> level_for_segment=GetLevelForSegment(level);
-        for(int i=level_for_segment.first;i<=level_for_segment.second;i++)
-        {
-          added_segment->RecordFileDeletion(levels_[i].deleted_files_for_judge);
-          added_segment->MakeActualDelete(cmp_);
-          //added_segment->UpdateSegmentIsChanged();
-        }
-        auto after_deleted_files=added_segment->get_files();
-        for(int i=0;i<int(after_deleted_files.size());i++)
-        {
-          for(auto file:after_deleted_files[i])
-          {
-
-          }
-        }
-        std::vector<std::pair<FileMetaData*,int>>filelist=AddSegmentsAndMerge(level,added_segment,cmp_);
-        for(auto& sample_pair:filelist)
-        {
-          ApplyFileAddition((level+1)*level_per_segment_level-sample_pair.second,sample_pair.first);
-          files_may_caused_trush.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
-          added_files_by_segment_.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
-          //levels_[(level+1)*level_per_segment_level-sample_pair.second].added_files.emplace(sample_pair.first);
-        }
-      }
-  }
-  for(int level=0;level<num_levels_;level++)
-  {
-     //int actual_level=vstorage->GetInsertLevelForSegment(level);
-     int actual_level=GetInsertLevelForSegment(level);
-     auto& added_files_map = levels_[actual_level].added_files_for_judge;
-     std::vector<FileMetaData*> added_files;
-     for(auto&f:added_files_map)
-     {
-      added_files.emplace_back(f.second);
-     }
-     std::sort(added_files.begin(),added_files.end(),pair_comp_for_files);
-     //std::vector<std::pair<FileMetaData*,int>>result=AddFileForSegments(actual_level,added_files,cmp_);
-     for(auto& sample_pair:result)
-     {
-        ApplyFileAddition((level+1)*level_per_segment_level-sample_pair.second,sample_pair.first);
-        files_may_caused_trush.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
-        added_files_single.emplace(sample_pair.first->fd.GetNumber(),(level+1)*level_per_segment_level-sample_pair.second);
-        //levels_[(level+1)*level_per_segment_level-sample_pair.second].added_files.emplace(sample_pair.first);
-     }
-  }
-  MakeDeleteSegmentClear();
-  if(has_base_segemnt_trush)
-  {
-    for(auto& p:base_segment_trush)
-    {
-      for(auto&q:p)
-      {
-        delete q;
-      }
-    }
-  }
-    for (int level = 0; level < num_levels_; ++level)
-    {
-      for (size_t pos = 0; pos < base_segment_[level].size(); ++pos)
-      {
-        base_segment_[level][pos]->RebuildFileLocation();
-      }
-    }
-  //vstorage->RebuildSegmentsMap();
-  //vstorage->UpdateSegmentsLevel();
-  has_new_versionedit=false;
-  has_base_segemnt_trush=true;*/
-}
-/*void ActualSaveSegmentsTo(VersionStorageInfo* vstorage)
-{
-  if(has_new_versionedit)
-  {
-    SaveSegmentsTo();
-  }
-  vstorage->CopySegment(base_segment_);
-  has_new_versionedit=false;
-  has_base_segemnt_trush=false;
-  files_may_caused_trush.clear();
-}*/
-//无用
-void AddSegments(int level,Segment* segments,const InternalKeyComparator* cmp)
-  {
-    
-    for(int i=int(base_segment_.size());i<(level+1);i++)
-    {
-      base_segment_.emplace_back(std::vector<Segment*>());
-      //num_segments_level_++;
-    }
-    //segments->MakeActualDelete(cmp);
-    if(!segments->IsEmpty())
-    {
-        base_segment_[level].emplace_back(segments);
-    }
-  }
-  //无用
- void AddFileForSegments(int level,std::vector<FileMetaData*>& added_files,const InternalKeyComparator* cmp,std::vector<int>& deleted_segment_list)
-  {
-    std::vector<std::pair<FileMetaData*,int>> return_vector;
-    if(level>=int(base_segment_.size()))
-    {
-      base_segment_.resize(level+1);
-    }
-    for(auto& new_file:added_files)
-    {
-      auto& level_segments = base_segment_[level];
-      std::vector<Segment*> overlapping_segments;
-      int deleted_it=0;
-      int position=-1;
-      int total=0;
-      int middle=-1;
-      if(level_segments.empty())
-      {
-          //const Comparator* ucmp = base_vstorage_->user_comparator();
-          //base_segment_[level].emplace_back(new Segment(new_file,ucmp));
-          //continue;
-          ApplyFileAddition(level*level_per_segment_level+level_per_segment_level-1,new_file);
-          continue;
-      }
-      for (auto& exiting_segments:level_segments)
-      {
-          middle++;
-          bool overlaps = cmp->Compare(new_file->smallest, exiting_segments->largest) <= 0 &&
-            cmp->Compare(new_file->largest, exiting_segments->smallest) >= 0;
-          if (overlaps)
-          {
-            if(position==-1)
-            {
-              position=middle;
-            }
-            total++;
-            overlapping_segments.emplace_back(exiting_segments);
-            continue;
-          }
-          if(position!=-1)
-          {
-            break;
-          }
-      }
-      if (overlapping_segments.empty())
-      {
-        ApplyFileAddition(level*level_per_segment_level+level_per_segment_level-1,new_file);
+      // all files before this segments
+      CreateSegmentsForSeparateFiles(files_not_overlap_with_segment, vstorage,
+                                     level, add_file_index, ordered_add_files,
+                                     icmp, /* last */ true);
+      // no deletion and addtion, and no need merge
+      // just copy
+      if (!changed[i]) {
+        vstorage->AddSegment(level, base_segments[i]);
         continue;
       }
-      Segment* sp=new Segment(*overlapping_segments[0]);
-      
-      overlapping_segments[0]=sp;
-      overlapping_segments[0]->UpdateSegmentNum(version_set_->NewSegmentNumber());
-      
-      for(int i=1;i<int(overlapping_segments.size());i++)
-      {
-        const std::vector<std::vector<FileMetaData*>> should_added_files= overlapping_segments[i]->get_files();
-        overlapping_segments[0]->AppendFileListAtLast(should_added_files,overlapping_segments[i]->largest);
+      // need change
+      // so push into change list
+      segments_to_change.push_back(base_segments[i]);
+      // if need merge with next segment
+      // work is deferred to next loop
+      // changed set to true in order to skip copy
+      if (should_merge_next) {
+        should_merge_next = false;
+        changed[i + 1] = true;
+        continue;
       }
-      /*FileMetaData* actual_new_file=new FileMetaData(*new_file);
-      actual_new_file->refs=1;*/
-      int new_level=overlapping_segments[0]->AddFile(new_file,cmp);
-      /*
-      for(int i=1;i<int(overlapping_segments.size());i++)
-      {
-        delete overlapping_segments[i];
-      }*/
-      base_segment_[level][position]=overlapping_segments[0];
-      
-      for(int i=1;i<total;i++)
-      {
-        deleted_segment_list.emplace_back(overlapping_segments[i]->GetSegmentNum());
-      }
-      //return_vector.emplace_back(new_file,new_level);
+      // sort by insertion time (just id itself)
+      sort(new_files_in_top.begin(), new_files_in_top.end());
+      sort(new_files_in_bottom.begin(), new_files_in_bottom.end());
+      MergeAndSplitSegments(vstorage, segments_to_change, level,
+                            new_files_in_top, new_files_in_bottom, icmp);
     }
-    //return return_vector;
-    
+    // file after last segment
+    while (add_file_index < ordered_add_files.size()) {
+      CreateSegmentsForSeparateFiles(files_not_overlap_with_segment, vstorage,
+                                     level, add_file_index, ordered_add_files,
+                                     icmp);
+      add_file_index++;
+    }
+    CreateSegmentsForSeparateFiles(files_not_overlap_with_segment, vstorage,
+                                   level, add_file_index, ordered_add_files,
+                                   icmp, /* last */ true);
   }
-  std::vector<std::pair<FileMetaData*,int>> AddSegmentsAndMerge(int level,Segment* new_segment,const InternalKeyComparator* cmp)const
-  {
-    if (level >= int(base_segment_.size()))
-    {
-      base_segment_.resize(level + 1);
-      //num_segments_level_=(level+1);
+  void SaveSegmentsTo(VersionStorageInfo* vstorage) const {
+    const auto& segment_levels =
+        base_vstorage_->num_non_empty_segments_levels();
+    // <= because files move to empty level
+    for (int level = 0; level <= segment_levels; level++) {
+      SaveSegmentsTo(vstorage, level);
     }
-    //new_segment->MakeActualDelete(cmp);
-    if(new_segment->IsEmpty())
-    {
-        std::vector<std::pair<FileMetaData*,int>> return_vector;
-        return return_vector;
-    }
-    auto& level_segments = base_segment_[level];
-    std::vector<Segment*> overlapping_segments;
-    int position=-1;
-    int total=0;
-    int middle=-1;
-    for (auto& exiting_segments:level_segments)
-    {
-        middle++;
-        bool overlaps = cmp->Compare(new_segment->smallest, exiting_segments->largest) <= 0 &&
-            cmp->Compare(new_segment->largest, exiting_segments->smallest) >= 0;
-        if (overlaps)
-        {
-          if(position==-1)
-          {
-            position=middle;
-          }
-          total++;
-          overlapping_segments.emplace_back(exiting_segments);
-          continue;
-        }
-        if(position!=-1)
-        {
-          break;
-        }
-    }
-    if (overlapping_segments.empty())
-    {
-        if(cmp->Compare(new_segment->smallest,level_segments.back()->largest)>0)
-        {
-          level_segments.push_back(new_segment);
-          std::vector<std::vector<FileMetaData*>> filelist=new_segment->get_files();
-          std::vector<std::pair<FileMetaData*,int>> return_vector;
-          for(int i=0;i<int(filelist.size());i++)
-          {
-            for(auto&file:filelist[i])
-            {
-              return_vector.emplace_back(file,i);
-            }
-          }
-          return return_vector;
-        }
-        else{
-          level_segments.insert(level_segments.begin(),new_segment);
-          std::vector<std::vector<FileMetaData*>> filelist=new_segment->get_files();
-          std::vector<std::pair<FileMetaData*,int>> return_vector;
-          for(int i=0;i<int(filelist.size());i++)
-          {
-            for(auto&file:filelist[i])
-            {
-              return_vector.emplace_back(file,i);
-            }
-          }
-          return return_vector;
-        }
-    }
-    Segment* s=new Segment(*overlapping_segments[0]);
-    overlapping_segments[0]=s;
-    overlapping_segments[0]->UpdateSegmentNum(version_set_->NewSegmentNumber());
-    for(int i=1;i<int(overlapping_segments.size());i++)
-    {
-      const std::vector<std::vector<FileMetaData*>> added_files= overlapping_segments[i]->get_files();
-      overlapping_segments[0]->AppendFileListAtLast(added_files,overlapping_segments[i]->largest);
-    }
-    std::vector<std::pair<FileMetaData*,int>>return_vector=overlapping_segments[0]->AddFiles(new_segment->get_files(),cmp);
-    for(int i=1;i<int(overlapping_segments.size());i++)
-    {
-      delete overlapping_segments[i];
-    }
-    base_segment_[level][position]=overlapping_segments[0];
-    for(int i=1;i<total;i++)
-    {
-      base_segment_[level].erase(base_segment_[level].begin()+position+i);
-    }
-    return return_vector;
+    vstorage->GenerateFiles();
   }
+
   void SaveCompactCursorsTo(VersionStorageInfo* vstorage) const {
     for (auto iter = updated_compact_cursors_.begin();
          iter != updated_compact_cursors_.end(); iter++) {
@@ -4282,7 +1871,7 @@ void AddSegments(int level,Segment* segments,const InternalKeyComparator* cmp)
   }
 
   // Save the current state in *vstorage.
-  Status SaveTo(VersionStorageInfo* vstorage)  {
+  Status SaveTo(VersionStorageInfo* vstorage) {
     assert(!track_found_and_missing_files_ || valid_version_available_);
     Status s;
 
@@ -4300,17 +1889,15 @@ void AddSegments(int level,Segment* segments,const InternalKeyComparator* cmp)
     }
 
     SaveSegmentsTo(vstorage);
-    //vstorage->AddFilesAfterSegment();
-    //SaveSSTFilesTo(vstorage);
+    // vstorage->AddFilesAfterSegment();
+    // SaveSSTFilesTo(vstorage);
 
     SaveBlobFilesTo(vstorage);
 
     SaveCompactCursorsTo(vstorage);
 
-    
-
     s = CheckConsistency(vstorage);
-    //加入等待IO完成的函数
+
     return s;
   }
 
@@ -4437,7 +2024,7 @@ VersionBuilder::VersionBuilder(
                    version_edit_handler, track_found_and_missing_files,
                    allow_incomplete_valid_version)) {}
 
-VersionBuilder::~VersionBuilder() =default;
+VersionBuilder::~VersionBuilder() = default;
 
 bool VersionBuilder::CheckConsistencyForNumLevels() {
   return rep_->CheckConsistencyForNumLevels();

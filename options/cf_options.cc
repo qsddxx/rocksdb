@@ -1037,7 +1037,8 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       blob_cache(cf_options.blob_cache),
       persist_user_defined_timestamps(
           cf_options.persist_user_defined_timestamps),
-      cf_allow_ingest_behind(cf_options.cf_allow_ingest_behind) {}
+      cf_allow_ingest_behind(cf_options.cf_allow_ingest_behind),
+      level_per_segment_level(cf_options.level_per_segment_level)  {}
 
 ImmutableOptions::ImmutableOptions() : ImmutableOptions(Options()) {}
 

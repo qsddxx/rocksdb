@@ -405,6 +405,8 @@ struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   // around 300.
   uint32_t uncache_aggressiveness = 0;
 
+  uint32_t level_per_segment_level = 10;
+
   // Create ColumnFamilyOptions with default values for all fields
   ColumnFamilyOptions();
   // Create ColumnFamilyOptions from Options

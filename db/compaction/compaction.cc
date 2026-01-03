@@ -551,12 +551,15 @@ bool Compaction::InputCompressionMatchesOutput() const {
 }
 
 bool Compaction::IsTrivialMove() const {
+  // for segment compaction, we can always do trivial move if marked so
+  if (cfd_->ioptions().compaction_style == kCompactionStyleSegment) {
+    return is_trivial_move_;
+  }
   // Avoid a move if there is lots of overlapping grandparent data.
   // Otherwise, the move could create a parent file that will require
   // a very expensive merge later on.
   // If start_level_== output_level_, the purpose is to force compaction
   // filter to be applied to that level, and thus cannot be a trivial move.
-
   // Check if start level have files with overlapping ranges
   if (start_level_ == 0 && input_vstorage_->level0_non_overlapping() == false &&
       l0_files_might_overlap_) {
@@ -589,11 +592,6 @@ bool Compaction::IsTrivialMove() const {
   if ((mutable_cf_options_.compaction_options_universal.allow_trivial_move) &&
       (output_level_ != 0) &&
       (cfd_->ioptions().compaction_style == kCompactionStyleUniversal)) {
-    return is_trivial_move_;
-  }
-  if ((mutable_cf_options_.compaction_options_universal.allow_trivial_move) &&
-      (output_level_ != 0) &&
-      (cfd_->ioptions().compaction_style == kCompactionStyleSegment)) {
     return is_trivial_move_;
   }
 
@@ -636,14 +634,10 @@ bool Compaction::IsTrivialMove() const {
 }
 
 void Compaction::AddInputDeletions(VersionEdit* out_edit) {
- for (size_t which = 0; which < num_input_levels(); which++) {
+  for (size_t which = 0; which < num_input_levels(); which++) {
     for (size_t i = 0; i < inputs_[which].size(); i++) {
-     out_edit->DeleteFile(level(which), inputs_[which][i]->fd.GetNumber());
+      out_edit->DeleteFile(level(which), inputs_[which][i]->fd.GetNumber());
     }
-  }
-  for(int i=0;i<static_cast<int>(segment_number.size());i++)
-  {
-    out_edit->DeleteSegment(segment_level,*input_vstorage_->GetSegment(segment_number[i]));
   }
 }
 
@@ -781,11 +775,9 @@ uint64_t Compaction::CalculateTotalInputSize() const {
 
 void Compaction::ReleaseCompactionFiles(const Status& status) {
   MarkFilesBeingCompacted(false);
-  for(auto num:segment_number)
-  {
-    Segment* segment_=input_vstorage_->GetSegment(num);
-    segment_->being_compacted=false;
-  }
+  auto segment_id = input_vstorage_->GetFileInWhichSegment(
+      inputs_[0].files[0]->fd.GetNumber());
+  input_vstorage_->GetSegmentById(segment_id)->being_compacted = false;
   cfd_->compaction_picker()->ReleaseCompactionFiles(this, status);
 }
 
@@ -951,7 +943,7 @@ bool Compaction::ShouldFormSubcompactions() const {
   } else if (cfd_->ioptions().compaction_style == kCompactionStyleUniversal) {
     return number_levels_ > 1 && output_level_ > 0;
   } else {
-    return false;
+    return cfd_->ioptions().compaction_style == kCompactionStyleSegment;
   }
 }
 

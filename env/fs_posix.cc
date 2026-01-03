@@ -64,7 +64,8 @@
 #include "util/string_util.h"
 #include "util/thread_local.h"
 #include "util/threadpool_imp.h"
-#include "io_async.h"
+
+#include "liburing.h"
 
 #if !defined(TMPFS_MAGIC)
 #define TMPFS_MAGIC 0x01021994
@@ -278,10 +279,11 @@ class PosixFileSystem : public FileSystem {
     return s;
   }
 
-  virtual IOStatus OpenWritableFile(const std::string& fname,
-                                    const FileOptions& options, bool reopen,
-                                    std::unique_ptr<FSWritableFile>* result,
-                                    IODebugContext* /*dbg*/) {
+  virtual IOStatus OpenWritableFile(
+      const std::string& fname, const FileOptions& options, bool reopen,
+      std::unique_ptr<FSWritableFile>* result, IODebugContext* /*dbg*/,
+      std::atomic<uint64_t>* compaction_write_num_count = nullptr,
+      int compaction_id = 0) {
     result->reset();
     IOStatus s;
     int fd = -1;
@@ -331,14 +333,16 @@ class PosixFileSystem : public FileSystem {
         return s;
       }
     }
-    if(options.use_io_uring_writes)
-    {
+    if (compaction_write_num_count != nullptr) {
       EnvOptions no_mmap_writes_options = options;
       no_mmap_writes_options.use_mmap_writes = false;
-      result->reset(new AsyncPosixWritableFile(fname,fd,GetLogicalBlockSizeForWriteIfNeeded(no_mmap_writes_options, fname, fd),
-          no_mmap_writes_options, initial_file_size,GetRing(),GetCompactionIdToWriteNumMap()));
-    }
-    else if (options.use_mmap_writes && !forceMmapOff_) {
+      result->reset(new AsyncPosixWritableFile(
+          fname, fd,
+          GetLogicalBlockSizeForWriteIfNeeded(no_mmap_writes_options, fname,
+                                              fd),
+          no_mmap_writes_options, initial_file_size, GetRing(), GetRingMutex(),
+          compaction_write_num_count, compaction_id));
+    } else if (options.use_mmap_writes && !forceMmapOff_) {
       result->reset(
           new PosixMmapFile(fname, fd, page_size_, options, initial_file_size));
     } else if (options.use_direct_writes && !options.use_mmap_writes) {
@@ -378,6 +382,15 @@ class PosixFileSystem : public FileSystem {
                            std::unique_ptr<FSWritableFile>* result,
                            IODebugContext* dbg) override {
     return OpenWritableFile(fname, options, false, result, dbg);
+  }
+
+  IOStatus NewAsyncWritableFile(
+      const std::string& fname, const FileOptions& options,
+      std::unique_ptr<FSWritableFile>* result, IODebugContext* dbg,
+      std::atomic<uint64_t>* compaction_write_num_count,
+      int compaction_id) override {
+    return OpenWritableFile(fname, options, false, result, dbg,
+                            compaction_write_num_count, compaction_id);
   }
 
   IOStatus ReopenWritableFile(const std::string& fname,
@@ -679,7 +692,7 @@ class PosixFileSystem : public FileSystem {
 
   IOStatus GetFileSize(const std::string& fname, const IOOptions& /*opts*/,
                        uint64_t* size, IODebugContext* /*dbg*/) override {
-    struct stat sbuf {};
+    struct stat sbuf{};
     if (stat(fname.c_str(), &sbuf) != 0) {
       *size = 0;
       return IOError("while stat a file for size", fname, errno);
@@ -979,6 +992,7 @@ class PosixFileSystem : public FileSystem {
     return Status::OK();
   }
 #endif
+  io_uring* GetIoUring() override { return &ring_base; }
  private:
   bool forceMmapOff_ = false;  // do we override Env options?
 
@@ -1301,6 +1315,11 @@ class PosixFileSystem : public FileSystem {
   static size_t GetLogicalBlockSizeForWriteIfNeeded(const EnvOptions& options,
                                                     const std::string& fname,
                                                     int fd);
+  io_uring* GetRing() { return &ring_base; }
+  std::mutex* GetRingMutex() { return &ring_mutex; }
+  struct io_uring ring_base;
+  struct io_uring_params params;
+  std::mutex ring_mutex;
 };
 
 #ifdef OS_LINUX
@@ -1344,6 +1363,10 @@ PosixFileSystem::PosixFileSystem()
     delete new_io_uring;
   }
 #endif
+  int queue_depth = 1024;
+  memset(&params, 0, sizeof(params));
+  int ring_fd = io_uring_setup(queue_depth, &params);
+  io_uring_queue_init_params(ring_fd, &ring_base, &params);
 }
 
 }  // namespace

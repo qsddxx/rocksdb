@@ -165,9 +165,7 @@ IOStatus WritableFileWriter::Append(const IOOptions& opts, const Slice& data,
     // We never write directly to disk with direct I/O on.
     // or we simply use it for its original purpose to accumulate many small
     // chunks
-    WriteAsyncWithIOUring(io_options);
-    /*
-    if (use_direct_io() || (buf_.Capacity() >= left)) {
+    if (use_io_uring_ || use_direct_io() || (buf_.Capacity() >= left)) {
       while (left > 0) {
         size_t appended = buf_.Append(src, left);
         if (perform_data_verification_ && buffered_data_with_checksum_) {
@@ -193,7 +191,7 @@ IOStatus WritableFileWriter::Append(const IOOptions& opts, const Slice& data,
       } else {
         s = WriteBuffered(io_options, src, left);
       }
-    }*/
+    }
   }
 
   TEST_KILL_RANDOM("WritableFileWriter::Append:1");
@@ -367,7 +365,9 @@ IOStatus WritableFileWriter::Flush(const IOOptions& opts) {
   TEST_KILL_RANDOM_WITH_WEIGHT("WritableFileWriter::Flush:0", REDUCE_ODDS2);
 
   if (buf_.CurrentSize() > 0) {
-    if (use_direct_io()) {
+    if (use_io_uring_) {
+      s = WriteAsyncWithIOUring(io_options);
+    } else if (use_direct_io()) {
       if (pending_sync_) {
         if (perform_data_verification_ && buffered_data_with_checksum_) {
           s = WriteDirectWithChecksum(io_options);
@@ -376,25 +376,18 @@ IOStatus WritableFileWriter::Flush(const IOOptions& opts) {
         }
       }
     } else {
-      WriteAsyncWithIOUring(io_options);
-      /*
       if (perform_data_verification_ && buffered_data_with_checksum_) {
         s = WriteBufferedWithChecksum(io_options, buf_.BufferStart(),
                                       buf_.CurrentSize());
       } else {
         s = WriteBuffered(io_options, buf_.BufferStart(), buf_.CurrentSize());
       }
-        */
     }
     if (!s.ok()) {
       set_seen_error(s);
       return s;
     }
   }
-  AlignedBuffer new_buf_;
-  new_buf_.Alignment(writable_file_->GetRequiredBufferAlignment());
-  new_buf_.AllocateNewBuffer(std::min((size_t)65536, max_buffer_size_));
-  buf_=std::move(new_buf_);
 
   {
     FileOperationInfo::StartTimePoint start_ts;
@@ -581,64 +574,68 @@ IOStatus WritableFileWriter::RangeSync(const IOOptions& opts, uint64_t offset,
   return s;
 }
 
-// This method writes to disk the specified data and makes use of the rate
-// limiter if available
-IOStatus WritableFileWriter::WriteAsyncWithIOUring(const IOOptions& opts)
-{
-   if (seen_error()) {
+IOStatus WritableFileWriter::WriteAsyncWithIOUring(const IOOptions& opts) {
+  if (seen_error()) {
     return GetWriterHasPreviousErrorStatus();
   }
 
   IOStatus s;
-  size_t allowed=buf_.CurrentSize();
-  uint64_t old_size = writable_file_->GetFileSize(opts, nullptr);
-  auto prev_perf_level = GetPerfLevel();
-   AlignedBuffer new_buf;  
-   new_buf.Alignment(buf_.Alignment());  
-   new_buf.AllocateNewBuffer(std::min((size_t)65536, max_buffer_size_));
-   AlignedBuffer async_buf = std::move(buf_);  
-   buf_ = std::move(new_buf);
-   FileOperationInfo::StartTimePoint start_ts;
-   if (ShouldNotifyListeners()) {
-        start_ts = FileOperationInfo::StartNow();
-        old_size = next_write_offset_;
-      }
-   s = writable_file_->Append(async_buf, opts,nullptr);
-   if (!s.ok()) {
-          // If writable_file_->Append() failed, then the data may or may not
-          // exist in the underlying memory buffer, OS page cache, remote file
-          // system's buffer, etc. If WritableFileWriter keeps the data in
-          // buf_, then a future Close() or write retry may send the data to
-          // the underlying file again. If the data does exist in the
-          // underlying buffer and gets written to the file eventually despite
-          // returning error, the file may end up with two duplicate pieces of
-          // data. Therefore, clear the buf_ at the WritableFileWriter layer
-          // and let caller determine error handling.
-          buf_.Size(0);
-          buffered_data_crc32c_checksum_ = 0;
-        }
-        SetPerfLevel(prev_perf_level);
+  assert(!use_direct_io());
+  
+  AlignedBuffer asyncbuf;
+  asyncbuf.Alignment(writable_file_->GetRequiredBufferAlignment());
+  asyncbuf.AllocateNewBuffer(std::min((size_t)65536, max_buffer_size_));
+
+  std::swap(buf_, asyncbuf);
+  size_t size = asyncbuf.CurrentSize();
+  DataVerificationInfo v_info;
+
+  {
+    IOSTATS_TIMER_GUARD(write_nanos);
+    TEST_SYNC_POINT("WritableFileWriter::Flush:BeforeAsyncAppend");
+
+    FileOperationInfo::StartTimePoint start_ts;
+    uint64_t old_size = writable_file_->GetFileSize(opts, nullptr);
     if (ShouldNotifyListeners()) {
-        auto finish_ts = std::chrono::steady_clock::now();
-        NotifyOnFileWriteFinish(old_size, allowed, start_ts, finish_ts, s);
-        if (!s.ok()) {
-          NotifyOnIOError(s, FileOperationType::kAppend, file_name(), allowed,
-                          old_size);
-        }
-      }
+      start_ts = FileOperationInfo::StartNow();
+      old_size = next_write_offset_;
+    }
+    {
+      auto prev_perf_level = GetPerfLevel();
+
+      IOSTATS_CPU_TIMER_GUARD(cpu_write_nanos, clock_);
+      s = writable_file_->AsyncAppend(asyncbuf, opts, nullptr);
+      SetPerfLevel(prev_perf_level);
+    }
+    if (ShouldNotifyListeners()) {
+      auto finish_ts = std::chrono::steady_clock::now();
+      NotifyOnFileWriteFinish(old_size, size, start_ts, finish_ts, s);
       if (!s.ok()) {
-        set_seen_error(s);
-        return s;
+        NotifyOnIOError(s, FileOperationType::kAppend, file_name(), size,
+                        old_size);
       }
-      uint64_t cur_size = flushed_size_.load(std::memory_order_acquire);
-    flushed_size_.store(cur_size + allowed, std::memory_order_release);
-    buf_.Size(0);
+    }
+    if (!s.ok()) {
+      set_seen_error(s);
+      return s;
+    }
+  }
+
+  IOSTATS_ADD(bytes_written, size);
+  TEST_KILL_RANDOM("WritableFileWriter::WriteBuffered:0");
+
+  uint64_t cur_size = flushed_size_.load(std::memory_order_acquire);
+  flushed_size_.store(cur_size + size, std::memory_order_release);
+  buf_.Size(0);
   buffered_data_crc32c_checksum_ = 0;
   if (!s.ok()) {
     set_seen_error(s);
   }
   return s;
 }
+
+// This method writes to disk the specified data and makes use of the rate
+// limiter if available
 IOStatus WritableFileWriter::WriteBuffered(const IOOptions& opts,
                                            const char* data, size_t size) {
   if (seen_error()) {

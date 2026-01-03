@@ -101,7 +101,7 @@ dummy := $(shell (export ROCKSDB_ROOT="$(CURDIR)"; \
                   export ROCKSDB_NO_FBCODE="$(ROCKSDB_NO_FBCODE)"; \
                   export USE_CLANG="$(USE_CLANG)"; \
                   export LIB_MODE="$(LIB_MODE)"; \
-		  export ROCKSDB_CXX_STANDARD="$(ROCKSDB_CXX_STANDARD)"; \
+		  export ROCKSDB_CXX_STANDARD="c++2a"; \
 		  export USE_FOLLY="$(USE_FOLLY)"; \
 		  export USE_FOLLY_LITE="$(USE_FOLLY_LITE)"; \
                   "$(CURDIR)/build_tools/build_detect_platform" "$(CURDIR)/make_config.mk"))
@@ -142,6 +142,8 @@ ifeq ($(LIB_MODE),shared)
 CXXFLAGS += $(PLATFORM_SHARED_CFLAGS) -DROCKSDB_DLL
 CFLAGS +=  $(PLATFORM_SHARED_CFLAGS) -DROCKSDB_DLL
 endif
+
+USE_COROUTINES = 1
 
 GIT_COMMAND ?= git
 ifeq ($(USE_COROUTINES), 1)

@@ -87,24 +87,6 @@ class MockTestWritableFile : public FSWritableFileOwnerWrapper {
     EXPECT_EQ(options.rate_limiter_priority, write_io_priority_);
     return target()->Append(data, options, verification_info, dbg);
   }
-  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
-                          IODebugContext* dbg)override{return target()->Append(async_buf,options,dbg);};
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg)override{return target()->PositionedAppend(async_buf,offset,options,dbg);};
-  IOStatus PositionedAppend(const Slice& /* data */,
-                                    uint64_t /* offset */,
-                                    const IOOptions& /*options*/,
-                                    IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("PositionedAppend");
-  }
-  IOStatus PositionedAppend(
-      const Slice& /* data */, uint64_t /* offset */,
-      const IOOptions& /*options*/,
-      const DataVerificationInfo& /* verification_info */,
-      IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("PositionedAppend");
-  }
   IOStatus Close(const IOOptions& options, IODebugContext* dbg) override {
     EXPECT_EQ(options.rate_limiter_priority, write_io_priority_);
     return target()->Close(options, dbg);
@@ -699,7 +681,10 @@ class CompactionJobTestBase : public testing::Test {
 
     compaction_job.Prepare(std::nullopt /*subcompact to be computed*/);
     mutex_.Unlock();
-    Status s = compaction_job.Run();
+    Status s;
+    auto task = compaction_job.Run(s);
+    while (!task.resume()) {
+    }
     ASSERT_OK(s);
     ASSERT_OK(compaction_job.io_status());
     mutex_.Lock();

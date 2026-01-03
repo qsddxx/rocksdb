@@ -83,20 +83,6 @@ class CompactionFilter;
 
 class Compaction {
  public:
-  //Segment segment_copy;
-  bool next_level;
-  std::vector<int> segment_number{};
-  int segment_level=0;
-  uint64_t compaction_id=0;
-  std::vector<std::vector<FileMetaData*>> GetFileList()
-  {
-    std::vector<std::vector<FileMetaData*>> filelist;
-    for(auto& f:inputs_)
-    {
-      filelist.emplace_back(f.files);
-    }
-    return filelist;
-  }
   Compaction(VersionStorageInfo* input_version,
              const ImmutableOptions& immutable_options,
              const MutableCFOptions& mutable_cf_options,
@@ -491,10 +477,6 @@ class Compaction {
 
   // mark (or clear) all files that are being compacted
   void MarkFilesBeingCompacted(bool being_compacted) const;
-  VersionStorageInfo* GetVersionStorageInfo()
-  {
-    return input_vstorage_;
-  }
 
  private:
   Status InitInputTableProperties();

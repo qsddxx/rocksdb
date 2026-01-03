@@ -41,6 +41,8 @@
 #include "util/coding.h"
 #include "util/string_util.h"
 
+#include "db/elastic/task.h" 
+
 #if defined(OS_LINUX) && !defined(F_SET_RW_HINT)
 #define F_LINUX_SPECIFIC_BASE 1024
 #define F_SET_RW_HINT (F_LINUX_SPECIFIC_BASE + 12)
@@ -608,7 +610,7 @@ PosixRandomAccessFile::PosixRandomAccessFile(
 PosixRandomAccessFile::~PosixRandomAccessFile() { close(fd_); }
 
 IOStatus PosixRandomAccessFile::GetFileSize(uint64_t* result) {
-  struct stat sbuf {};
+  struct stat sbuf{};
   if (fstat(fd_, &sbuf) != 0) {
     *result = 0;
     return IOError("While fstat with fd " + std::to_string(fd_), filename_,
@@ -1797,22 +1799,16 @@ IOStatus PosixDirectory::FsyncWithDirOptions(
 #endif  // OS_AIX
   return s;
 }
-AsyncPosixWritableFile::AsyncPosixWritableFile(const std::string& fname, int fd,
-                                               size_t logical_block_size,
-                                               const EnvOptions& options,
-                                               uint64_t initial_file_size,
-                                               io_uring* ring,
-                                               folly::ConcurrentHashMap<uint64_t, int>* file_map_,
-                                               std::atomic<uint64_t> compaction_id_)
-    : FSWritableFile(options),
-      filename_(fname),
-      use_direct_io_(options.use_direct_writes),
-      fd_(fd),
-      filesize_(initial_file_size),
-      logical_sector_size_(logical_block_size),
+AsyncPosixWritableFile::AsyncPosixWritableFile(
+    const std::string& fname, int fd, size_t logical_block_size,
+    const EnvOptions& options, uint64_t initial_file_size, io_uring* ring, std::mutex* ring_mutex,
+    std::atomic<uint64_t>* compaction_write_num_count, int compaction_id)
+    : PosixWritableFile(fname, fd, logical_block_size, options,
+                        initial_file_size),
       ring_(ring),
-      file_map(file_map_),
-      compaction_id(compaction_id_.load()) {
+      ring_mutex_(ring_mutex),
+      compaction_write_num_count_(compaction_write_num_count),
+      compaction_id_(compaction_id) {
 #ifdef ROCKSDB_FALLOCATE_PRESENT
   allow_fallocate_ = options.allow_fallocate;
   fallocate_with_keep_size_ = options.fallocate_with_keep_size;
@@ -1830,386 +1826,89 @@ AsyncPosixWritableFile::~AsyncPosixWritableFile() {
   }
 }
 
-IOStatus AsyncPosixWritableFile::Append(const Slice& data, const IOOptions& opts,
-                                        IODebugContext* dbg) {
-  if (use_direct_io()) {
-    assert(IsSectorAligned(data.size(), GetRequiredBufferAlignment()));
-    assert(IsSectorAligned(data.data(), GetRequiredBufferAlignment()));
-  }
-  if (!ring_) {
-    return SyncAppend(data);
-  }
-  return AsyncAppend(data);
+IOStatus AsyncPosixWritableFile::Append(const Slice& /* data */,
+                                        const IOOptions& /* opts */,
+                                        IODebugContext* /* dbg */) {
+  return IOStatus::NotSupported(
+      "AsyncPosixWritableFile does not support synchronous Append");
 }
 
-IOStatus AsyncPosixWritableFile::Append(const Slice& data, const IOOptions& opts,
-                                        const DataVerificationInfo& verification_info,
-                                        IODebugContext* dbg) {
+IOStatus AsyncPosixWritableFile::Append(
+    const Slice& data, const IOOptions& opts,
+    const DataVerificationInfo& /* verification_info */, IODebugContext* dbg) {
   return Append(data, opts, dbg);
 }
 
-IOStatus AsyncPosixWritableFile::PositionedAppend(const Slice& data, uint64_t offset,
-                                                  const IOOptions& opts,
-                                                  IODebugContext* dbg) {
-  if (use_direct_io()) {
-    assert(IsSectorAligned(offset, GetRequiredBufferAlignment()));
-    assert(IsSectorAligned(data.size(), GetRequiredBufferAlignment()));
-    assert(IsSectorAligned(data.data(), GetRequiredBufferAlignment()));
-  }
-  assert(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
-  if (!ring_) {
-    return SyncPositionedAppend(data, offset);
-  }
-  return AsyncPositionedAppend(data, offset);
+IOStatus AsyncPosixWritableFile::PositionedAppend(const Slice& /* data */,
+                                                  uint64_t /* offset */,
+                                                  const IOOptions& /* opts */,
+                                                  IODebugContext* /* dbg */) {
+  return IOStatus::NotSupported(
+      "AsyncPosixWritableFile does not support synchronous Append");
 }
-IOStatus AsyncPosixWritableFile::Append(AlignedBuffer& async_buf,
-                                        const IOOptions& options,
-                                        IODebugContext* dbg) {
-  size_t nbytes = async_buf.CurrentSize();
-  uint64_t current_offset = filesize_;
-  auto it = file_map->find(compaction_id);
-  if (it != file_map->end()) {
-    //__sync_fetch_and_add(&it->second, 1);
-    auto local_value=it->second;
-    local_value++;
-    file_map->assign(compaction_id, local_value);  
-  }
-  auto* write_op = new AsyncWriteOp{
-    .buffer = std::move(async_buf),
-    .size = nbytes,
-    .offset = current_offset,
-    .compaction_id = compaction_id,
-    .fd = fd_
-  };
-  io_uring_sqe* sqe = nullptr;
-  while(sqe==nullptr)
-  {
-    sqe = io_uring_get_sqe(ring_);
-  }
-  /*
-  if (!sqe) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("No available SQEs");
-  }*/
-  io_uring_prep_write(sqe, fd_,
-                     write_op->buffer.BufferStart(),
-                     nbytes,
-                     current_offset);
-  io_uring_sqe_set_data(sqe, write_op);
-  int ret = io_uring_submit(ring_);
-  /*
-  if (ret < 0) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("Failed to submit IO", strerror(-ret));
-  }*/
-  filesize_ += nbytes;
-  return IOStatus::OK();
-}
-IOStatus AsyncPosixWritableFile::PositionedAppend(AlignedBuffer& async_buf,uint64_t offset,
-                                        const IOOptions& options,
-                                        IODebugContext* dbg) {
-  size_t nbytes = async_buf.CurrentSize();
-  auto it = file_map->find(compaction_id);
-  if (it != file_map->end()) {
-    //__sync_fetch_and_add(&it->second, 1);
-    auto local_value=it->second;
-    local_value++;
-    file_map->assign(compaction_id, local_value);  
-  }
-  auto* write_op = new AsyncWriteOp{
-    .buffer = std::move(async_buf),
-    .size = nbytes,
-    .offset = offset,
-    .compaction_id = compaction_id,
-    .fd = fd_
-  };
-  io_uring_sqe* sqe = nullptr;
-  while(sqe==nullptr)
-  {
-    sqe = io_uring_get_sqe(ring_);
-  }
-  /*
-  if (!sqe) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("No available SQEs");
-  }*/
-  io_uring_prep_write(sqe, fd_,
-                     write_op->buffer.BufferStart(),
-                     nbytes,
-                     offset);
-  io_uring_sqe_set_data(sqe, write_op);
-  int ret = io_uring_submit(ring_);
-  /*
-  if (ret < 0) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("Failed to submit IO", strerror(-ret));
-  }*/
-  filesize_ += nbytes;
-  return IOStatus::OK();
-}
-IOStatus AsyncPosixWritableFile::PositionedAppend(const Slice& data, uint64_t offset,
-                                                  const IOOptions& opts,
-                                                  const DataVerificationInfo& verification_info,
-                                                  IODebugContext* dbg) {
+
+IOStatus AsyncPosixWritableFile::PositionedAppend(
+    const Slice& data, uint64_t offset, const IOOptions& opts,
+    const DataVerificationInfo& /* verification_info */, IODebugContext* dbg) {
   return PositionedAppend(data, offset, opts, dbg);
 }
 
-IOStatus AsyncPosixWritableFile::Truncate(uint64_t size, const IOOptions& opts,
-                                          IODebugContext* dbg) {
-  IOStatus s;
-  int r = ftruncate(fd_, size);
-  if (r < 0) {
-    s = IOError("While ftruncate file to size " + std::to_string(size),
-                filename_, errno);
-  } else {
-    filesize_ = size;
-  }
-  return s;
+IOStatus AsyncPosixWritableFile::AsyncAppend(AlignedBuffer& async_buf,
+                                             const IOOptions& options,
+                                             IODebugContext* dbg) {
+  return PositionedAsyncAppend(async_buf, filesize_, options, dbg);
 }
 
-IOStatus AsyncPosixWritableFile::Close(const IOOptions& opts, IODebugContext* dbg) {
-  IOStatus s;
-  size_t block_size;
-  size_t last_allocated_block;
-  GetPreallocationStatus(&block_size, &last_allocated_block);
-  TEST_SYNC_POINT_CALLBACK("PosixWritableFile::Close", &last_allocated_block);
-  if (last_allocated_block > 0) {
-    int dummy __attribute__((__unused__));
-    dummy = ftruncate(fd_, filesize_);
-    
-#if defined(ROCKSDB_FALLOCATE_PRESENT) && defined(FALLOC_FL_PUNCH_HOLE)
-    struct stat file_stats;
-    int result = fstat(fd_, &file_stats);
-    if (result == 0 &&
-        static_cast<size_t>((file_stats.st_size + file_stats.st_blksize - 1) /
-                            file_stats.st_blksize) !=
-                static_cast<size_t>(file_stats.st_blocks /
-                                    (file_stats.st_blksize / 512))) {
-      IOSTATS_TIMER_GUARD(allocate_nanos);
-      if (allow_fallocate_) {
-        fallocate(fd_, FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, filesize_,
-                  block_size * last_allocated_block - filesize_);
-      }
+IOStatus AsyncPosixWritableFile::PositionedAsyncAppend(
+    AlignedBuffer& async_buf, uint64_t offset, const IOOptions& /* options */,
+    IODebugContext* /* dbg */) {
+  size_t nbytes = async_buf.CurrentSize();
+  compaction_write_num_count_->fetch_add(1);
+  auto* write_op = new AsyncWriteOp{.buffer = std::move(async_buf),
+                                    .size = nbytes,
+                                    .offset = offset,
+                                    .compaction_write_num_count = compaction_write_num_count_,
+                                    .compaction_id = compaction_id_,
+                                    .fd = fd_};
+  {
+    std::unique_lock<std::mutex> lock(*ring_mutex_);
+    io_uring_sqe* sqe = io_uring_get_sqe(ring_);
+    if (!sqe) {
+      delete write_op;
+      return IOStatus::IOError("No available SQEs");
     }
-#endif
+    io_uring_prep_write(sqe, fd_, write_op->buffer.BufferStart(), nbytes, offset);
+    io_uring_sqe_set_data(sqe, write_op);
+    int ret = io_uring_submit(ring_);
+    if (ret < 0) {
+      delete write_op;
+      return IOStatus::IOError("Failed to submit IO", strerror(-ret));
+    }
   }
-  if (close(fd_) < 0) {
-    s = IOError("While closing file after writing", filename_, errno);
-  }
-  fd_ = -1;
-  return s;
-}
-
-IOStatus AsyncPosixWritableFile::Flush(const IOOptions& opts, IODebugContext* dbg) {
+  filesize_ = offset + nbytes;
   return IOStatus::OK();
 }
 
-IOStatus AsyncPosixWritableFile::Sync(const IOOptions& opts, IODebugContext* dbg) {
-#ifdef HAVE_FULLFSYNC
-  if (::fcntl(fd_, F_FULLFSYNC) < 0) {
-    return IOError("while fcntl(F_FULLFSYNC)", filename_, errno);
-  }
-#else
-  if (fdatasync(fd_) < 0) {
-    return IOError("While fdatasync", filename_, errno);
-  }
-#endif
+IOStatus AsyncPosixWritableFile::Close(const IOOptions& /* opts */,
+                                       IODebugContext* /* dbg */) {
   return IOStatus::OK();
 }
 
-IOStatus AsyncPosixWritableFile::Fsync(const IOOptions& opts, IODebugContext* dbg) {
-#ifdef HAVE_FULLFSYNC
-  if (::fcntl(fd_, F_FULLFSYNC) < 0) {
-    return IOError("while fcntl(F_FULLFSYNC)", filename_, errno);
-  }
-#else
-  if (fsync(fd_) < 0) {
-    return IOError("While fsync", filename_, errno);
-  }
-#endif
-  return IOStatus::OK();
+IOStatus AsyncPosixWritableFile::Sync(const IOOptions& /* opts */,
+                                      IODebugContext* /* dbg */) {
+  return IOStatus::NotSupported(
+      "AsyncPosixWritableFile does not support synchronous Sync");
 }
 
-bool AsyncPosixWritableFile::IsSyncThreadSafe() const {
-  return true;
+IOStatus AsyncPosixWritableFile::Fsync(const IOOptions& /* opts */,
+                                       IODebugContext* /* dbg */) {
+  return IOStatus::NotSupported(
+      "AsyncPosixWritableFile does not support synchronous Fsync");
 }
 
-uint64_t AsyncPosixWritableFile::GetFileSize(const IOOptions& opts, IODebugContext* dbg) {
-  return filesize_;
-}
+bool AsyncPosixWritableFile::IsSyncThreadSafe() const { return false; }
 
-void AsyncPosixWritableFile::SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint) {
-#ifdef OS_LINUX
-#ifndef ROCKSDB_VALGRIND_RUN
-  uint64_t fcntl_hint = hint;
+bool AsyncPosixWritableFile::use_direct_io() const { return false; }
 
-  if (hint == write_hint_) {
-    return;
-  }
-  if (fcntl(fd_, F_SET_RW_HINT, &fcntl_hint) == 0) {
-    write_hint_ = hint;
-  }
-#else
-  (void)hint;
-#endif
-#else
-  (void)hint;
-#endif
-}
-
-IOStatus AsyncPosixWritableFile::InvalidateCache(size_t offset, size_t length) {
-  if (use_direct_io()) {
-    return IOStatus::OK();
-  }
-#ifndef OS_LINUX
-  (void)offset;
-  (void)length;
-  return IOStatus::OK();
-#else
-  int ret = Fadvise(fd_, offset, length, POSIX_FADV_DONTNEED);
-  if (ret == 0) {
-    return IOStatus::OK();
-  }
-  return IOError("While fadvise NotNeeded", filename_, errno);
-#endif
-}
-
-#ifdef ROCKSDB_FALLOCATE_PRESENT
-IOStatus AsyncPosixWritableFile::Allocate(uint64_t offset, uint64_t len,
-                                          const IOOptions& opts,
-                                          IODebugContext* dbg) {
-  assert(offset <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
-  assert(len <= static_cast<uint64_t>(std::numeric_limits<off_t>::max()));
-  TEST_KILL_RANDOM("PosixWritableFile::Allocate:0");
-  IOSTATS_TIMER_GUARD(allocate_nanos);
-  int alloc_status = 0;
-  if (allow_fallocate_) {
-    alloc_status =
-        fallocate(fd_, fallocate_with_keep_size_ ? FALLOC_FL_KEEP_SIZE : 0,
-                  static_cast<off_t>(offset), static_cast<off_t>(len));
-  }
-  if (alloc_status == 0) {
-    return IOStatus::OK();
-  } else {
-    return IOError("While fallocate offset " + std::to_string(offset) +
-                      " len " + std::to_string(len),
-                  filename_, errno);
-  }
-}
-#endif
-
-bool AsyncPosixWritableFile::use_direct_io() const {
-  return use_direct_io_;
-}
-
-size_t AsyncPosixWritableFile::GetRequiredBufferAlignment() const {
-  return logical_sector_size_;
-}
-
-IOStatus AsyncPosixWritableFile::SyncAppend(const Slice& data) {
-  const char* src = data.data();
-  size_t nbytes = data.size();
-
-  if (!PosixWrite(fd_, src, nbytes)) {
-    return IOError("While appending to file", filename_, errno);
-  }
-  filesize_ += nbytes;
-  return IOStatus::OK();
-}
-
-IOStatus AsyncPosixWritableFile::SyncPositionedAppend(const Slice& data, uint64_t offset) {
-  const char* src = data.data();
-  size_t nbytes = data.size();
-  if (!PosixPositionedWrite(fd_, src, nbytes, static_cast<off_t>(offset))) {
-    return IOError("While pwrite to file at offset " + std::to_string(offset),
-                  filename_, errno);
-  }
-  filesize_ = std::max(filesize_, offset + nbytes);
-  return IOStatus::OK();
-}
-
-IOStatus AsyncPosixWritableFile::AsyncAppend(const Slice& data) {
-  /*
-  const char* src = data.data();
-  size_t nbytes = data.size();
-  uint64_t current_offset = filesize_;
-  auto it = file_map->find(compaction_id);
-  if (it != file_map->end()) {
-    __sync_fetch_and_add(&it->second, 1);
-  }
-  auto* write_op = new AsyncWriteOp{
-    .buffer = std::make_unique<char[]>(nbytes),
-    .size = nbytes,
-    .offset = current_offset,
-    .file_id = file_id_,
-    .compaction_id = compaction_id,
-    .fd=fd_
-  };
-  memcpy(write_op->buffer.get(), src, nbytes);
-  io_uring_sqe* sqe = nullptr;
-  while (sqe == nullptr) {
-    sqe = io_uring_get_sqe(ring_);
-  }
-  if (!sqe) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("No available SQEs");
-  }
-  io_uring_prep_write(sqe, fd_, write_op->buffer.get(), nbytes, current_offset);
-  io_uring_sqe_set_data(sqe, write_op);
-  int ret = io_uring_submit(ring_);
-  if (ret < 0) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("Failed to submit IO", strerror(-ret));
-  }
-  filesize_ += nbytes;
-  */
-  return IOStatus::OK();
-}
-
-IOStatus AsyncPosixWritableFile::AsyncPositionedAppend(const Slice& data, uint64_t offset) {
-  /*
-  const char* src = data.data();
-  size_t nbytes = data.size();
-  auto it = file_map->find(compaction_id);
-  if (it != file_map->end()) {
-    __sync_fetch_and_add(&it->second, 1);
-  }
-  auto* write_op = new AsyncWriteOp{
-    .buffer = std::make_unique<char[]>(nbytes),
-    .size = nbytes,
-    .offset = offset,
-    .file_id = file_id_,
-    .compaction_id = compaction_id,
-    .fd=fd_
-  };
-  memcpy(write_op->buffer.get(), src, nbytes);
-  io_uring_sqe* sqe = nullptr;
-  while (sqe == nullptr) {
-    sqe = io_uring_get_sqe(ring_);
-  }
-  if (!sqe) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("No available SQEs");
-  }
-  io_uring_prep_write(sqe, fd_, write_op->buffer.get(), nbytes, offset);
-  io_uring_sqe_set_data(sqe, write_op);
-  int ret = io_uring_submit(ring_);
-  if (ret < 0) {
-    __sync_fetch_and_add(&it->second, -1);
-    delete write_op;
-    return IOStatus::IOError("Failed to submit IO", strerror(-ret));
-  }
-  filesize_ = std::max(filesize_, offset + nbytes);
-  */
-  return IOStatus::OK();
-  
-}
 }  // namespace ROCKSDB_NAMESPACE
 #endif

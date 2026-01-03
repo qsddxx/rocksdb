@@ -138,7 +138,6 @@ class WritableFileWriter {
                                         char* buf);
 
   std::string file_name_;
-  public:
   FSWritableFilePtr writable_file_;
   SystemClock* clock_;
   AlignedBuffer buf_;
@@ -168,9 +167,9 @@ class WritableFileWriter {
   uint32_t buffered_data_crc32c_checksum_;
   bool buffered_data_with_checksum_;
   Temperature temperature_;
+  bool use_io_uring_;
 
  public:
-  IOStatus WriteAsyncWithIOUring(const IOOptions& opts);
   WritableFileWriter(
       std::unique_ptr<FSWritableFile>&& file, const std::string& _file_name,
       const FileOptions& options, SystemClock* clock = nullptr,
@@ -180,7 +179,8 @@ class WritableFileWriter {
       const std::vector<std::shared_ptr<EventListener>>& listeners = {},
       FileChecksumGenFactory* file_checksum_gen_factory = nullptr,
       bool perform_data_verification = false,
-      bool buffered_data_with_checksum = false)
+      bool buffered_data_with_checksum = false,
+      bool use_io_uring = false)
       : file_name_(_file_name),
         writable_file_(std::move(file), io_tracer, _file_name),
         clock_(clock),
@@ -204,7 +204,8 @@ class WritableFileWriter {
         checksum_finalized_(false),
         perform_data_verification_(perform_data_verification),
         buffered_data_crc32c_checksum_(0),
-        buffered_data_with_checksum_(buffered_data_with_checksum) {
+        buffered_data_with_checksum_(buffered_data_with_checksum),
+        use_io_uring_(use_io_uring) {
     temperature_ = options.temperature;
     assert(!use_direct_io() || max_buffer_size_ > 0);
     TEST_SYNC_POINT_CALLBACK("WritableFileWriter::WritableFileWriter:0",
@@ -257,6 +258,8 @@ class WritableFileWriter {
   // will calculate the checksum internally.
   IOStatus Append(const IOOptions& opts, const Slice& data,
                   uint32_t crc32c_checksum = 0);
+
+  IOStatus WriteAsyncWithIOUring(const IOOptions& opts);
 
   IOStatus Pad(const IOOptions& opts, const size_t pad_bytes);
 
@@ -361,6 +364,7 @@ class WritableFileWriter {
   // `opts` should've been called with `FinalizeIOOptions()` before passing in
   IOStatus WriteBuffered(const IOOptions& opts, const char* data, size_t size);
   // `opts` should've been called with `FinalizeIOOptions()` before passing in
+  IOStatus AsyncWriteBuffered(const IOOptions& opts, const char* data, size_t size);
   IOStatus WriteBufferedWithChecksum(const IOOptions& opts, const char* data,
                                      size_t size);
   // `opts` should've been called with `FinalizeIOOptions()` before passing in

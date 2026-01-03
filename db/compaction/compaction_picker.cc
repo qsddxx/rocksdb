@@ -128,7 +128,7 @@ CompressionOptions GetCompressionOptions(const MutableCFOptions& cf_options,
 
 CompactionPicker::CompactionPicker(const ImmutableOptions& ioptions,
                                    const InternalKeyComparator* icmp)
-    : ioptions_(ioptions), icmp_(icmp) {next_compaction_number_.store(2);}
+    : ioptions_(ioptions), icmp_(icmp) {}
 
 CompactionPicker::~CompactionPicker() = default;
 
@@ -281,50 +281,7 @@ bool CompactionPicker::RangeOverlapWithCompaction(
   // Did not overlap with any running compaction in level `level`
   return false;
 }
-bool CompactionPicker::FilesRangeOverlapWithCompaction_Segment(const std::vector<CompactionInputFiles>& inputs, int level,
-    int proximal_level) const
-{
-      bool is_empty = true;
-  for (auto& in : inputs) {
-    if (!in.empty()) {
-      is_empty = false;
-      break;
-    }
-  }
-   if (is_empty) {
-    // No files in inputs
-    return false;
-  }
-  InternalKey smallest, largest;
-  GetRange(inputs, &smallest, &largest, Compaction::kInvalidLevel);
-  return RangeOverlapWithCompaction_Segment(smallest.user_key(), largest.user_key(),
-                                    level);
-}
-bool CompactionPicker::RangeOverlapWithCompaction_Segment(
-    const Slice& smallest_user_key, const Slice& largest_user_key,
-    int level) const {
-  const Comparator* ucmp = icmp_->user_comparator();
-  for (Compaction* c : compactions_in_progress_) {
-      if (c->segment_level == level &&
-          ucmp->CompareWithoutTimestamp(smallest_user_key,
-                                        c->GetLargestUserKey()) <= 0 &&
-          ucmp->CompareWithoutTimestamp(largest_user_key,
-                                        c->GetSmallestUserKey()) >= 0)
-      {
-        // Overlap
-        return true;
-      }
-      if (c->SupportsPerKeyPlacement())
-      {
-        if (c->OverlapProximalLevelOutputRange(smallest_user_key,largest_user_key))
-        {
-          return true;
-        }
-    }
-  }
-  // Did not overlap with any running compaction in level `level`
-  return false;
-}
+
 bool CompactionPicker::FilesRangeOverlapWithCompaction(
     const std::vector<CompactionInputFiles>& inputs, int level,
     int proximal_level) const {
@@ -1188,26 +1145,6 @@ Status CompactionPicker::SanitizeAndConvertCompactionInputFiles(
         "overlapping key range");
   }
   return Status::OK();
-}
-void CompactionPicker::RegisterCompaction_Segment(Compaction* c) {
-  if (c == nullptr) {
-    return;
-  }
-  assert(ioptions_.compaction_style != kCompactionStyleLevel ||
-         c->output_level() == 0 ||
-         !FilesRangeOverlapWithCompaction_Segment(*c->inputs(), c->output_level(),
-                                          c->kInvalidLevel));
-  // CompactionReason::kExternalSstIngestion's start level is just a placeholder
-  // number without actual meaning as file ingestion technically does not have
-  // an input level like other compactions
-  /*if ((c->start_level() == 0 &&
-       c->compaction_reason() != CompactionReason::kExternalSstIngestion) ||
-      ioptions_.compaction_style == kCompactionStyleUniversal) {
-    level0_compactions_in_progress_.insert(c);
-  }*/
-  compactions_in_progress_.insert(c);
-  TEST_SYNC_POINT_CALLBACK("CompactionPicker::RegisterCompaction:Registered",
-                           c);
 }
 void CompactionPicker::RegisterCompaction(Compaction* c) {
   if (c == nullptr) {

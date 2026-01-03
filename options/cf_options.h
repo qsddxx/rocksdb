@@ -24,8 +24,6 @@ struct ImmutableCFOptions {
   static const char* kName() { return "ImmutableCFOptions"; }
   explicit ImmutableCFOptions();
   explicit ImmutableCFOptions(const ColumnFamilyOptions& cf_options);
-  //std::vector<uint64_t> level_max_filenum{5,6,7,7,7,7,7};
-  std::vector<int> level_segment_max_sorted_run_num{2,3,4,4,4,4,4};
 
   CompactionStyle compaction_style;
 
@@ -86,6 +84,10 @@ struct ImmutableCFOptions {
   bool persist_user_defined_timestamps;
 
   bool cf_allow_ingest_behind;
+
+  int level_per_segment_level;
+  
+  std::vector<int> level_segment_max_sorted_run_num{2,3,4,4,4,4,4};
 };
 
 struct ImmutableOptions : public ImmutableDBOptions, public ImmutableCFOptions {
@@ -107,7 +109,6 @@ struct ImmutableOptions : public ImmutableDBOptions, public ImmutableCFOptions {
 
 struct MutableCFOptions {
   static const char* kName() { return "MutableCFOptions"; }
-  int level_per_segment_level=10;
   explicit MutableCFOptions(const ColumnFamilyOptions& options)
       : write_buffer_size(options.write_buffer_size),
         max_write_buffer_number(options.max_write_buffer_number),

@@ -7,30 +7,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 #pragma once
-#ifndef FOLLY_F14_INTRINSICS_MODE
-#define FOLLY_F14_INTRINSICS_MODE 1  // 强制使用与你的 folly 匹配的 Mode=1
-#endif
 #include <errno.h>
 #if defined(ROCKSDB_IOURING_PRESENT)
 #include <liburing.h>
 #include <sys/uio.h>
 #endif
+#include <folly/concurrency/ConcurrentHashMap.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <functional>
 #include <map>
 #include <string>
-#include <folly/concurrency/ConcurrentHashMap.h>
+
+#include "liburing.h"
 #include "port/port.h"
 #include "rocksdb/env.h"
 #include "rocksdb/file_system.h"
 #include "rocksdb/io_status.h"
 #include "test_util/sync_point.h"
+#include "util/aligned_buffer.h"
 #include "util/mutexlock.h"
 #include "util/thread_local.h"
-#include "util/aligned_buffer.h"
-#include "liburing.h"
+
 // For non linux platform, the following macros are used only as place
 // holder.
 #if !(defined OS_LINUX) && !(defined OS_FREEBSD) && !(defined CYGWIN) && \
@@ -396,11 +395,6 @@ class PosixWritableFile : public FSWritableFile {
                   IODebugContext* dbg) override {
     return Append(data, opts, dbg);
   }
-  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
-                          IODebugContext* dbg)override{return IOStatus::OK();};
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg)override{return IOStatus::OK();};
   IOStatus PositionedAppend(const Slice& data, uint64_t offset,
                             const IOOptions& opts,
                             IODebugContext* dbg) override;
@@ -499,25 +493,6 @@ class PosixMmapFile : public FSWritableFile {
                   IODebugContext* dbg) override {
     return Append(data, opts, dbg);
   }
-  IOStatus Append(AlignedBuffer& async_buf,const IOOptions& options,
-                          IODebugContext* dbg)override{return IOStatus::OK();};
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg)override{return IOStatus::OK();};
-  IOStatus PositionedAppend(const Slice& /* data */,
-                                    uint64_t /* offset */,
-                                    const IOOptions& /*options*/,
-                                    IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("PositionedAppend");
-  }
-  IOStatus PositionedAppend(
-      const Slice& /* data */, uint64_t /* offset */,
-      const IOOptions& /*options*/,
-      const DataVerificationInfo& /* verification_info */,
-      IODebugContext* /*dbg*/) {
-    return IOStatus::NotSupported("PositionedAppend");
-  }
-
   IOStatus Flush(const IOOptions& opts, IODebugContext* dbg) override;
   IOStatus Sync(const IOOptions& opts, IODebugContext* dbg) override;
   IOStatus Fsync(const IOOptions& opts, IODebugContext* dbg) override;
@@ -574,33 +549,19 @@ class PosixDirectory : public FSDirectory {
   bool is_btrfs_;
   const std::string directory_name_;
 };
-class AsyncPosixWritableFile : public FSWritableFile {
- protected:
-  const std::string filename_;
-  const bool use_direct_io_;
-  int fd_;
-  uint64_t filesize_;
-  size_t logical_sector_size_;
-  io_uring* ring_;
-  folly::ConcurrentHashMap<uint64_t, int>* file_map;
-  uint64_t compaction_id;
 
-#ifdef ROCKSDB_FALLOCATE_PRESENT
-  bool allow_fallocate_;
-  bool fallocate_with_keep_size_;
-#endif
-#ifdef ROCKSDB_RANGESYNC_PRESENT
-  bool sync_file_range_supported_;
-#endif
+class AsyncPosixWritableFile : public PosixWritableFile {
+ protected:
+  io_uring* ring_;
+  std::mutex* ring_mutex_;
+  std::atomic<uint64_t>* compaction_write_num_count_;
 
  public:
-  explicit AsyncPosixWritableFile(const std::string& fname, int fd,
-                                  size_t logical_block_size,
-                                  const EnvOptions& options,
-                                  uint64_t initial_file_size,
-                                  io_uring* ring = nullptr,
-                                  folly::ConcurrentHashMap<uint64_t, int>* file_map_=nullptr,
-                                  std::atomic<uint64_t> compaction_id_ = 0);
+  explicit AsyncPosixWritableFile(
+      const std::string& fname, int fd, size_t logical_block_size,
+      const EnvOptions& options, uint64_t initial_file_size, io_uring* ring,
+      std::mutex* ring_mutex, std::atomic<uint64_t>* compaction_write_num_count,
+      int compaction_id);
   virtual ~AsyncPosixWritableFile();
 
   IOStatus Append(const Slice& data, const IOOptions& opts,
@@ -615,44 +576,19 @@ class AsyncPosixWritableFile : public FSWritableFile {
                             const IOOptions& opts,
                             const DataVerificationInfo& verification_info,
                             IODebugContext* dbg) override;
-  IOStatus Truncate(uint64_t size, const IOOptions& opts,
-                    IODebugContext* dbg) override;
-  IOStatus PositionedAppend(AlignedBuffer& async_buf, uint64_t offset,
-                            const IOOptions& options,
-                            IODebugContext* dbg) override;
+  IOStatus AsyncAppend(AlignedBuffer& async_buf, const IOOptions& options,
+                       IODebugContext* dbg) override;
+  IOStatus PositionedAsyncAppend(AlignedBuffer& async_buf, uint64_t offset,
+                                 const IOOptions& options,
+                                 IODebugContext* dbg) override;
 
-  IOStatus Append(AlignedBuffer& async_buf, const IOOptions& options,
-                  IODebugContext* dbg) override;
   IOStatus Close(const IOOptions& opts, IODebugContext* dbg) override;
-  IOStatus Flush(const IOOptions& opts, IODebugContext* dbg) override;
   IOStatus Sync(const IOOptions& opts, IODebugContext* dbg) override;
   IOStatus Fsync(const IOOptions& opts, IODebugContext* dbg) override;
   bool IsSyncThreadSafe() const override;
-  uint64_t GetFileSize(const IOOptions& opts, IODebugContext* dbg) override;
-  void SetWriteLifeTimeHint(Env::WriteLifeTimeHint hint);
-  IOStatus InvalidateCache(size_t offset, size_t length);
-
-#ifdef ROCKSDB_FALLOCATE_PRESENT
-  IOStatus Allocate(uint64_t offset, uint64_t len,
-                    const IOOptions& opts,
-                    IODebugContext* dbg);
-#endif
-
   bool use_direct_io() const override;
-  size_t GetRequiredBufferAlignment() const override;
 
  private:
-  struct AsyncWriteOp {
-    AlignedBuffer buffer;
-    size_t size;
-    uint64_t offset;
-    uint64_t compaction_id;
-    int fd;
-  };
-
-  IOStatus SyncAppend(const Slice& data);
-  IOStatus SyncPositionedAppend(const Slice& data, uint64_t offset);
-  IOStatus AsyncAppend(const Slice& data);
-  IOStatus AsyncPositionedAppend(const Slice& data, uint64_t offset);
+  int compaction_id_;
 };
 }  // namespace ROCKSDB_NAMESPACE
