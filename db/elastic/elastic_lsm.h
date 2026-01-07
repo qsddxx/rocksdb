@@ -15,14 +15,12 @@
 namespace ROCKSDB_NAMESPACE {
 class ElasticLSMImpl : public ElasticLSM {
  public:
-  ElasticLSMImpl(const ElasticLSMOptions& elastic_options, DBImpl* dbelastic, io_uring* ring);
+  ElasticLSMImpl(const ElasticLSMOptions& elastic_options);
   ~ElasticLSMImpl();
   using ElasticLSM::Open;
-  static Status Open(const DBOptions& db_options,
+  static Status Open(const Options& options,
                      const ElasticLSMOptions& elastic_options,
                      const std::string& dbname,
-                     const std::vector<ColumnFamilyDescriptor>& column_families,
-                     std::vector<ColumnFamilyHandle*>* handles,
                      std::unique_ptr<ElasticLSM>* dbptr);
 
   Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
@@ -83,7 +81,7 @@ class ElasticLSMImpl : public ElasticLSM {
 
   // compaction and flush related
   std::array<std::shared_ptr<compaction_task>, SLOT_NUM> compaction_tasks_;
-  slotmask compaction_tasks_mask_;
+  slotmask compaction_tasks_mask_ = 0;
 
   // folly::MPMCQueue<pausable_task*> flush_task_queue_;
 
@@ -119,7 +117,6 @@ class ElasticLSMImpl : public ElasticLSM {
     folly::MPMCQueue<int> del_task_list_;
     ElasticLSMImpl* elastic_lsm_;
     int time_ = 0;
-
   } schedular_;
 
   pausable_task Flush() {
@@ -181,7 +178,7 @@ class ElasticLSMImpl : public ElasticLSM {
     void put_back_task();
   };
 
-  std::vector<StrideSchedular> stride_schedulars_;
+  std::vector<std::unique_ptr<StrideSchedular>> stride_schedulars_;
 
   void NotifyBGThreadMaybeSchedule() {
     maybe_schedule_count_++;
@@ -199,6 +196,9 @@ class ElasticLSMImpl : public ElasticLSM {
   }
 
   bool CalcIfNeedTP() const {
+    if (tp_working_threads_num.load() == 0) {
+      return true;
+    }
     return tp_task_queue_.size() / tp_working_threads_num > tp_throughput_;
   }
 

@@ -2373,7 +2373,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
                     std::vector<ColumnFamilyHandle*>* handles,
                     std::unique_ptr<DB>* dbptr, const bool seq_per_batch,
                     const bool batch_per_txn, const bool is_retry,
-                    bool* can_retry) {
+                    bool* can_retry, ElasticLSMImpl* elastic_lsm_impl) {
   const WriteOptions write_options(Env::IOActivity::kDBOpen);
   const ReadOptions read_options(Env::IOActivity::kDBOpen);
 
@@ -2570,6 +2570,8 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       }
     }
   }
+
+  impl->elastic_lsm_impl_ = elastic_lsm_impl;
 
   if (s.ok() && impl->immutable_db_options_.persist_stats_to_disk) {
     // Install SuperVersion for hidden column family

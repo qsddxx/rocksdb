@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/version_set.h"
+
 #include <algorithm>
 #include <array>
 #include <cinttypes>
@@ -2231,7 +2232,7 @@ VersionStorageInfo::VersionStorageInfo(
       level_multiplier_(0.0),
       files_by_compaction_pri_(num_levels_),
       level0_non_overlapping_(false),
-      next_file_to_compact_by_size_(num_levels_),
+      next_file_to_compact_by_size_(num_levels_ * level_per_segment_level),
       compaction_score_(num_levels_),
       compaction_level_(num_levels_),
       l0_delay_trigger_count_(0),

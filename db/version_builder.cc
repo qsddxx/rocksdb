@@ -1550,6 +1550,9 @@ class VersionBuilder::Rep {
       VersionStorageInfo* vstorage, size_t level, size_t& add_file_index,
       const std::vector<int>& ordered_add_files,
       const InternalKeyComparator* icmp, bool last = false) const {
+    if (add_file_index >= ordered_add_files.size()) {
+      return;
+    }
     const auto& added_files_in_order = levels_[level].added_files_in_order;
     auto now_added_file_id = ordered_add_files[add_file_index];
     auto added_file = added_files_in_order[now_added_file_id];
@@ -1752,6 +1755,21 @@ class VersionBuilder::Rep {
                                    icmp, /* last */ true);
   }
   void SaveSegmentsTo(VersionStorageInfo* vstorage) const {
+
+    if (!num_levels_) {
+      return;
+    }
+    
+    EpochNumberRequirement epoch_number_requirement =
+        vstorage->GetEpochNumberRequirement();
+
+    if (epoch_number_requirement == EpochNumberRequirement::kMightMissing) {
+      bool promoted = PromoteEpochNumberRequirementIfNeeded(vstorage);
+      if (promoted) {
+        epoch_number_requirement = vstorage->GetEpochNumberRequirement();
+      }
+    }
+
     const auto& segment_levels =
         base_vstorage_->num_non_empty_segments_levels();
     // <= because files move to empty level

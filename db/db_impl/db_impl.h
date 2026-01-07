@@ -1108,7 +1108,7 @@ class DBImpl : public DB {
                      std::vector<ColumnFamilyHandle*>* handles,
                      std::unique_ptr<DB>* dbptr, const bool seq_per_batch,
                      const bool batch_per_txn, const bool is_retry,
-                     bool* can_retry);
+                     bool* can_retry, ElasticLSMImpl* elastic_lsm_impl = nullptr);
 
   static IOStatus CreateAndNewDirectory(
       FileSystem* fs, const std::string& dirname,

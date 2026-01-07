@@ -6,42 +6,74 @@ Status ElasticLSM::Open(const Options& options,
                         const ElasticLSMOptions& elastic_options,
                         const std::string& name,
                         std::unique_ptr<ElasticLSM>* dbptr) {
-  return ElasticLSMImpl::Open(
-      options, elastic_options, name,
-      std::vector<ColumnFamilyDescriptor>{ColumnFamilyDescriptor()}, nullptr,
-      dbptr);
+  return ElasticLSMImpl::Open(options, elastic_options, name, dbptr);
 }
 
-Status ElasticLSMImpl::Open(
-    const DBOptions& db_options, const ElasticLSMOptions& elastic_options,
-    const std::string& dbname,
-    const std::vector<ColumnFamilyDescriptor>& column_families,
-    std::vector<ColumnFamilyHandle*>* handles,
-    std::unique_ptr<ElasticLSM>* dbptr) {
+Status ElasticLSMImpl::Open(const Options& options,
+                            const ElasticLSMOptions& elastic_options,
+                            const std::string& dbname,
+                            std::unique_ptr<ElasticLSM>* dbptr) {
+  ElasticLSMImpl* elastic = new ElasticLSMImpl(elastic_options);
+
+  auto new_options = options;
+  new_options.level_compaction_dynamic_level_bytes = false;
+  new_options.max_subcompactions = elastic_options.max_background_threads;
+  new_options.use_direct_io_for_flush_and_compaction = false;
+  new_options.compaction_style = kCompactionStyleSegment;
+  new_options.create_if_missing = true;
   std::unique_ptr<DB> db;
-  const bool kSeqPerBatch = true;
-  const bool kBatchPerTxn = true;
-  bool can_retry = false;
   Status s;
-  do {
-    s = DBImpl::Open(db_options, dbname, column_families, handles, &db,
-                     !kSeqPerBatch, kBatchPerTxn, can_retry, &can_retry);
-  } while (!s.ok() && can_retry);
+
+  {
+    DBOptions db_options(new_options);
+    ColumnFamilyOptions cf_options(new_options);
+    std::vector<ColumnFamilyDescriptor> column_families;
+    column_families.emplace_back(kDefaultColumnFamilyName, cf_options);
+    if (db_options.persist_stats_to_disk) {
+      column_families.emplace_back(kPersistentStatsColumnFamilyName,
+                                   cf_options);
+    }
+    std::vector<ColumnFamilyHandle*> handles;
+
+    const bool kSeqPerBatch = true;
+    const bool kBatchPerTxn = true;
+    ThreadStatusUtil::SetEnableTracking(db_options.enable_thread_tracking);
+    ThreadStatusUtil::SetThreadOperation(
+        ThreadStatus::OperationType::OP_DBOPEN);
+    bool can_retry = false;
+    do {
+      s = DBImpl::Open(db_options, dbname, column_families, &handles, &db,
+                       !kSeqPerBatch, kBatchPerTxn, can_retry, &can_retry,
+                       elastic);
+    } while (!s.ok() && can_retry);
+    ThreadStatusUtil::ResetThreadStatus();
+
+    if (s.ok()) {
+      if (db_options.persist_stats_to_disk) {
+        assert(handles.size() == 2);
+      } else {
+        assert(handles.size() == 1);
+      }
+      // i can delete the handle since DBImpl is always holding a reference to
+      // default column family
+      if (db_options.persist_stats_to_disk && handles[1] != nullptr) {
+        delete handles[1];
+      }
+      delete handles[0];
+    }
+  }
 
   if (!s.ok()) {
+    delete elastic;
     return s;
   }
 
   DBImpl* dbelastic = dynamic_cast<DBImpl*>(db.get());
-  if (!dbelastic) {
-    return Status::InvalidArgument("Underlying DB is not DBImpl");
-  }
   db.release();
 
   // Wrap in ElasticLSM
-  ElasticLSMImpl* elastic = new ElasticLSMImpl(
-      elastic_options, dbelastic, dbelastic->GetFileSystem()->GetIoUring());
-  dbelastic->elastic_lsm_impl_ = elastic;
+  elastic->clock_ = dbelastic->GetSystemClock();
+  elastic->ring_ = dbelastic->GetFileSystem()->GetIoUring();
 
   // Return as DB interface
   dbptr->reset(elastic);
@@ -49,25 +81,33 @@ Status ElasticLSMImpl::Open(
   return Status::OK();
 }
 
-ElasticLSMImpl::ElasticLSMImpl(const ElasticLSMOptions& elastic_options,
-                               DBImpl* dbelastic, io_uring* ring)
+ElasticLSMImpl::ElasticLSMImpl(const ElasticLSMOptions& elastic_options)
     : options_(elastic_options),
-      db_(dbelastic),
-      // thread_pool_(),
-      clock_(dbelastic->GetSystemClock()),
       tp_task_queue_(131072),
       ap_task_queue_(131072),
-      ring_(ring),
-      schedular_(this) {}
+      compaction_done_work_queue_(1024),
+      schedular_(this) {
+  schedular_thread_pool_.emplace_back(&ElasticLSMImpl::BGSchedule, this);
+  stride_schedulars_.reserve(options_.max_background_threads);
+  for (int i = 0; i < options_.max_background_threads; ++i) {
+    stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
+    worker_thread_pool_.emplace_back(&ElasticLSMImpl::BGWork, this, i);
+  }
+}
 
 ElasticLSMImpl::~ElasticLSMImpl() {
   closed_ = true;
   schedule_count_.release();
-  // for (auto& t : thread_pool_) {
-  //   if (t.joinable()) {
-  //     t.join();
-  //   }
-  // }
+  for (auto& t : worker_thread_pool_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  for (auto& t : worker_thread_pool_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
 }
 
 Status ElasticLSMImpl::Put(const WriteOptions& options,
@@ -205,7 +245,7 @@ pausable_task ElasticLSMImpl::APTask() {
 }
 void ElasticLSMImpl::BGWork(int idx) {
   while (!closed_) {
-    stride_schedulars_[idx].work();
+    stride_schedulars_[idx]->work();
   }
 }
 void ElasticLSMImpl::CheckCQE() {
@@ -264,7 +304,7 @@ void ElasticLSMImpl::CompactionSchedular::schedule() {
     elastic_lsm_->compaction_tasks_[idx] = task.task;
     elastic_lsm_->compaction_tasks_mask_ |= 1 << idx;
     for (auto& i : elastic_lsm_->stride_schedulars_) {
-      i.NewTask(idx);
+      i->NewTask(idx);
     }
   }
 }
