@@ -2534,6 +2534,8 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   if (s.ok() && recovery_ctx.is_new_db_ && preserve_info.IsEnabled()) {
     impl->PrepopulateSeqnoToTimeMapping(preserve_info);
   }
+  
+  impl->elastic_lsm_impl_ = elastic_lsm_impl;
 
   if (s.ok()) {
     // set column family handles
@@ -2570,8 +2572,6 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       }
     }
   }
-
-  impl->elastic_lsm_impl_ = elastic_lsm_impl;
 
   if (s.ok() && impl->immutable_db_options_.persist_stats_to_disk) {
     // Install SuperVersion for hidden column family

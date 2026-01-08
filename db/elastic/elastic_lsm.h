@@ -22,6 +22,7 @@ class ElasticLSMImpl : public ElasticLSM {
                      const ElasticLSMOptions& elastic_options,
                      const std::string& dbname,
                      std::unique_ptr<ElasticLSM>* dbptr);
+  void StartThreads();
 
   Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
              const Slice& key, const Slice& value) override;
@@ -74,6 +75,7 @@ class ElasticLSMImpl : public ElasticLSM {
 
   // functions for threads
   void TPTask();
+  void ContinuousTPTask();
   pausable_task APTask();
   void BGWork(int idx);
   void CheckCQE();

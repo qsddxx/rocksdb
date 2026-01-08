@@ -71,9 +71,11 @@ Status ElasticLSMImpl::Open(const Options& options,
   DBImpl* dbelastic = dynamic_cast<DBImpl*>(db.get());
   db.release();
 
-  // Wrap in ElasticLSM
+  elastic->db_ = dbelastic;
   elastic->clock_ = dbelastic->GetSystemClock();
   elastic->ring_ = dbelastic->GetFileSystem()->GetIoUring();
+
+  elastic->StartThreads();
 
   // Return as DB interface
   dbptr->reset(elastic);
@@ -86,14 +88,7 @@ ElasticLSMImpl::ElasticLSMImpl(const ElasticLSMOptions& elastic_options)
       tp_task_queue_(131072),
       ap_task_queue_(131072),
       compaction_done_work_queue_(1024),
-      schedular_(this) {
-  schedular_thread_pool_.emplace_back(&ElasticLSMImpl::BGSchedule, this);
-  stride_schedulars_.reserve(options_.max_background_threads);
-  for (int i = 0; i < options_.max_background_threads; ++i) {
-    stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
-    worker_thread_pool_.emplace_back(&ElasticLSMImpl::BGWork, this, i);
-  }
-}
+      schedular_(this) {}
 
 ElasticLSMImpl::~ElasticLSMImpl() {
   closed_ = true;
@@ -107,6 +102,15 @@ ElasticLSMImpl::~ElasticLSMImpl() {
     if (t.joinable()) {
       t.join();
     }
+  }
+}
+
+void ElasticLSMImpl::StartThreads() {
+  schedular_thread_pool_.emplace_back(&ElasticLSMImpl::BGSchedule, this);
+  stride_schedulars_.reserve(options_.max_background_threads);
+  for (int i = 0; i < options_.max_background_threads; ++i) {
+    stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
+    worker_thread_pool_.emplace_back(&ElasticLSMImpl::BGWork, this, i);
   }
 }
 

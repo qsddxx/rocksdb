@@ -947,7 +947,8 @@ std::unordered_map<std::string, CompactionStyle>
         {"kCompactionStyleLevel", kCompactionStyleLevel},
         {"kCompactionStyleUniversal", kCompactionStyleUniversal},
         {"kCompactionStyleFIFO", kCompactionStyleFIFO},
-        {"kCompactionStyleNone", kCompactionStyleNone}};
+        {"kCompactionStyleNone", kCompactionStyleNone},
+        {"kCompactionStyleSegment", kCompactionStyleSegment}};
 
 std::unordered_map<std::string, CompactionPri>
     OptionsHelper::compaction_pri_string_map = {
