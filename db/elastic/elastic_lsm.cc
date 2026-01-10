@@ -1,4 +1,5 @@
 #include "db/elastic/elastic_lsm.h"
+#include <xmmintrin.h>  // For _mm_pause()
 
 namespace ROCKSDB_NAMESPACE {
 ElasticLSM::~ElasticLSM() = default;
@@ -92,13 +93,30 @@ ElasticLSMImpl::ElasticLSMImpl(const ElasticLSMOptions& elastic_options)
 
 ElasticLSMImpl::~ElasticLSMImpl() {
   closed_ = true;
+
+  // Wake up all sleeping threads (TP, BGWork, and BGSchedule)
+  // We need to release enough semaphores to wake up all sleeping threads
+  for (size_t i = 0; i < tp_thread_pool_.size(); i++) {
+    worker_sleep_sem_.release();
+  }
+  for (size_t i = 0; i < worker_thread_pool_.size(); i++) {
+    worker_sleep_sem_.release();
+  }
+  // Wake up BGSchedule thread
   schedule_count_.release();
+
+  // Wait for all threads to finish
   for (auto& t : worker_thread_pool_) {
     if (t.joinable()) {
       t.join();
     }
   }
-  for (auto& t : worker_thread_pool_) {
+  for (auto& t : tp_thread_pool_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+  for (auto& t : schedular_thread_pool_) {
     if (t.joinable()) {
       t.join();
     }
@@ -107,8 +125,14 @@ ElasticLSMImpl::~ElasticLSMImpl() {
 
 void ElasticLSMImpl::StartThreads() {
   schedular_thread_pool_.emplace_back(&ElasticLSMImpl::BGSchedule, this);
-  stride_schedulars_.reserve(options_.max_background_threads);
-  for (int i = 0; i < options_.max_background_threads; ++i) {
+  // Start dedicated TP task threads FIRST to ensure tp_working_threads_num > 0
+  for (int i = 0; i < options_.min_tp_threads; ++i) {
+    tp_thread_pool_.emplace_back(&ElasticLSMImpl::ContinuousTPTask, this);
+  }
+  // BGWork threads: max_background_threads minus min_tp_threads
+  int bg_work_threads = options_.max_background_threads - options_.min_tp_threads;
+  stride_schedulars_.reserve(bg_work_threads);
+  for (int i = 0; i < bg_work_threads; ++i) {
     stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
     worker_thread_pool_.emplace_back(&ElasticLSMImpl::BGWork, this, i);
   }
@@ -118,6 +142,7 @@ Status ElasticLSMImpl::Put(const WriteOptions& options,
                            ColumnFamilyHandle* column_family, const Slice& key,
                            const Slice& value) {
   auto t = new put_task(options, column_family, key, value);
+  SetTaskFlag(TP_TASK_PENDING);  // Set flag before writing to queue
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
@@ -126,6 +151,7 @@ Status ElasticLSMImpl::Delete(const WriteOptions& options,
                               ColumnFamilyHandle* column_family,
                               const Slice& key) {
   auto t = new delete_task(options, column_family, key);
+  SetTaskFlag(TP_TASK_PENDING);  // Set flag before writing to queue
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
@@ -134,6 +160,7 @@ Status ElasticLSMImpl::Update(const WriteOptions& options,
                               ColumnFamilyHandle* column_family,
                               const Slice& key, const Slice& value) {
   auto t = new update_task(options, column_family, key, value);
+  SetTaskFlag(TP_TASK_PENDING);  // Set flag before writing to queue
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
@@ -142,6 +169,7 @@ Status ElasticLSMImpl::Get(const ReadOptions& _read_options,
                            ColumnFamilyHandle* column_family, const Slice& key,
                            std::string* value) {
   auto t = new get_task(_read_options, column_family, key, value);
+  SetTaskFlag(TP_TASK_PENDING);  // Set flag before writing to queue
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
@@ -152,13 +180,14 @@ Status ElasticLSMImpl::Scan(const ReadOptions& _read_options,
                             std::vector<std::string>* answer) {
   auto t =
       new scan_task(_read_options, column_family, key, record_count, answer);
+  SetTaskFlag(TP_TASK_PENDING);  // Set flag before writing to queue
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
 
 void ElasticLSMImpl::TPTask() {
   // Pop up a task without locking
-  tp_working_threads_num++;
+  // Note: tp_working_threads_num is managed by ContinuousTPTask threads
   tp_task* task = nullptr;
   int task_cnt = 0;
   int target_cnt = tp_throughput_;
@@ -220,8 +249,61 @@ void ElasticLSMImpl::TPTask() {
       tp_throughput_ = (tp_throughput_.load() * 8 + new_throughput * 2) / 10;
     }
   }
+
+  // Clear flag if no more TP tasks
+  if (tp_task_queue_.size() == 0) {
+    ClearTaskFlag(TP_TASK_PENDING);
+  }
+}
+
+void ElasticLSMImpl::ContinuousTPTask() {
+  const int kMaxSpinLoops = 100;  // Maximum spin loops before sleeping
+  uint64_t idle_loop_count = 0;   // Thread-local idle counter
+
+  // Increment tp_working_threads_num at the start to keep it > 0
+  tp_working_threads_num++;
+
+  while (!closed_) {
+    // Check if there are TP tasks to process
+    if (HasAnyTPWork()) {
+      // Process TP tasks
+      TPTask();
+      idle_loop_count = 0;  // Reset idle counter after work
+      continue;
+    }
+
+    // No TP tasks, enter idle handling
+    idle_loop_count++;
+
+    if (idle_loop_count < kMaxSpinLoops) {
+      // Level 1: Brief spin with PAUSE instruction
+      // Use PAUSE to reduce power consumption on x86
+      int i;
+      for (i = 0; i < 10; i++) {
+        _mm_pause();  // x86 PAUSE instruction
+      }
+
+      // Quick check if new TP tasks arrived (lock-free, atomic read only)
+      if (HasAnyTPWork()) {
+        idle_loop_count = 0;  // Reset on instant wakeup
+        continue;
+      }
+
+    } else {
+      // Level 2: Enter sleep
+      // Double-check before sleeping (both flags and actual state)
+      if (!HasAnyTPWork()) {
+        worker_sleep_sem_.acquire();  // Sleep until woken up
+      }
+
+      idle_loop_count = 0;  // Reset after wakeup
+    }
+  }
+
+  // Decrement tp_working_threads_num when thread exits
   tp_working_threads_num--;
 }
+
 pausable_task ElasticLSMImpl::APTask() {
   // if (task) {
   //   // Perform range scanning using iterators and process each result through
@@ -247,9 +329,80 @@ pausable_task ElasticLSMImpl::APTask() {
   // }
   co_return;
 }
+
+// Helper methods to check for specific work types
+// Note: These are global checks, not per-StrideSchedular
+
+bool ElasticLSMImpl::HasAnyWork() const {
+  // Check if there's any work in the system.
+  // task_pending_flags_ is a hint mechanism for fast wake-up,
+  // but we also need to check actual queue state to avoid missing tasks.
+  if (HasAnyTask()) {
+    return true;  // Fast path: flag is set
+  }
+  // Slow path: check actual state when flag is not set
+  return tp_task_queue_.size() > 0 || compaction_tasks_mask_ != 0;
+}
+
+bool ElasticLSMImpl::HasAnyTPWork() const {
+  return tp_task_queue_.size() > 0;
+}
+
+bool ElasticLSMImpl::HasPendingCompactionSchedule() const {
+  return compaction_schedule_count_.load(std::memory_order_acquire) > 0;
+}
+
+bool ElasticLSMImpl::HasCompactionWork() const {
+  // Check if there are any active compaction tasks
+  return compaction_tasks_mask_ != 0;
+}
+
 void ElasticLSMImpl::BGWork(int idx) {
+  const int kMaxSpinLoops = 100;  // Maximum spin loops before sleeping
+  uint64_t idle_loop_count = 0;   // Thread-local idle counter
+
   while (!closed_) {
-    stride_schedulars_[idx]->work();
+    // Level 0: Try to process tasks
+    stride_schedulars_[idx]->sync();  // Sync new tasks first
+    bool did_work = stride_schedulars_[idx]->work();
+
+    if (did_work) {
+      idle_loop_count = 0;  // Reset idle counter on successful work
+      continue;  // Has work, continue processing
+    }
+
+    // No work, enter idle handling
+    idle_loop_count++;
+
+    if (idle_loop_count < kMaxSpinLoops) {
+      // Level 1: Brief spin with PAUSE instruction
+      // Use PAUSE to reduce power consumption on x86
+      int i;
+      for (i = 0; i < 10; i++) {
+        _mm_pause();  // x86 PAUSE instruction
+      }
+
+      // Quick check if new tasks arrived (lock-free, atomic read only)
+      // HasAnyTask() checks task_pending_flags_ (fast path)
+      if (HasAnyTask()) {
+        idle_loop_count = 0;  // Reset on instant wakeup
+        sleep_stats_.instant_wakeup_count.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+
+    } else {
+      // Level 2: Enter sleep
+      sleep_stats_.spin_count.fetch_add(1, std::memory_order_relaxed);
+
+      // Double-check before sleeping (both flags and actual state)
+      if (!HasAnyWork()) {
+        sleep_stats_.sleep_count.fetch_add(1, std::memory_order_relaxed);
+        worker_sleep_sem_.acquire();  // Sleep until woken up
+        sleep_stats_.wakeup_count.fetch_add(1, std::memory_order_relaxed);
+      }
+
+      idle_loop_count = 0;  // Reset after wakeup
+    }
   }
 }
 void ElasticLSMImpl::CheckCQE() {
@@ -277,6 +430,10 @@ void ElasticLSMImpl::BGSchedule() {
     if (compaction_schedule_count_) {
       compaction_schedule_count_--;
       schedular_.schedule();
+      // Clear flags if no more compaction work
+      if (compaction_tasks_mask_ == 0 && schedular_.IsTaskListEmpty()) {
+        ClearTaskFlag(COMPACTION_PENDING | SCHEDULE_PENDING);
+      }
     } else if (compaction_done_work_count_) {
       compaction_done_work_count_--;
       int task_id;
@@ -287,7 +444,15 @@ void ElasticLSMImpl::BGSchedule() {
       schedular_.RemoveTask(task_id);
     } else if (maybe_schedule_count_) {
       maybe_schedule_count_--;
+      // Note: BackgroundMaybeScheduleFlushOrCompaction() expects mutex to be held
+      // and will unlock it internally at the end
+      db_->mutex_.Lock();
       db_->BackgroundMaybeScheduleFlushOrCompaction();
+      // Mutex is already unlocked by the function above
+      // Clear schedule pending flag if no more schedule requests
+      if (maybe_schedule_count_.load() == 0) {
+        ClearTaskFlag(SCHEDULE_PENDING);
+      }
     }
   }
 }
@@ -326,20 +491,37 @@ void ElasticLSMImpl::StrideSchedular::sync() {
   }
 }
 
-void ElasticLSMImpl::StrideSchedular::work() {
-  sync();
+bool ElasticLSMImpl::StrideSchedular::work() {
+  // Note: sync() is called by BGWork before calling work()
+
   // do high proirity task first
-  if (docompaction(true)) return;
-  // if tptask queue is more than
-  if (elastic_lsm_->CalcIfNeedTP()) {
-    elastic_lsm_->TPTask();
-    return;
+  if (docompaction(true)) {
+    return true;
   }
+
+  // if tptask queue pressure is high
+  if (elastic_lsm_->CalcIfNeedTP()) {
+    elastic_lsm_->tp_working_threads_num++;
+    elastic_lsm_->TPTask();
+    elastic_lsm_->tp_working_threads_num--;
+    return true;
+  }
+
   // do compaction
-  if (docompaction(false)) return;
-  // nothing to do, do tp
-  elastic_lsm_->TPTask();
-  // or sleep
+  if (docompaction(false)) {
+    return true;
+  }
+
+  // nothing to do, try tp work
+  if (elastic_lsm_->HasAnyTPWork()) {
+    elastic_lsm_->tp_working_threads_num++;
+    elastic_lsm_->TPTask();
+    elastic_lsm_->tp_working_threads_num--;
+    return true;
+  }
+
+  // No work found
+  return false;
 }
 bool ElasticLSMImpl::StrideSchedular::docompaction(bool highpriority) {
   while (!task_queue_.empty()) {

@@ -50,6 +50,7 @@ class ElasticLSMImpl : public ElasticLSM {
   ElasticLSMOptions options_;
   DBImpl* db_;
   std::vector<std::thread> worker_thread_pool_;
+  std::vector<std::thread> tp_thread_pool_;  // Dedicated TP task threads
   std::vector<std::thread> schedular_thread_pool_;
   SystemClock* clock_;
   // tp related
@@ -67,6 +68,51 @@ class ElasticLSMImpl : public ElasticLSM {
   std::atomic<int> compaction_done_work_count_{0};
   // io_uring related
   io_uring* ring_;
+
+  // Smart sleep/wake mechanism for worker threads
+  enum TaskFlagBits : uint64_t {
+    TP_TASK_PENDING = 1ULL << 0,      // TP tasks pending
+    AP_TASK_PENDING = 1ULL << 1,      // AP tasks pending
+    COMPACTION_PENDING = 1ULL << 2,   // Compaction tasks pending
+    SCHEDULE_PENDING = 1ULL << 3,     // Schedule requests pending
+  };
+
+  std::counting_semaphore<> worker_sleep_sem_{0};  // Semaphore for worker sleep/wake
+  std::atomic<uint64_t> task_pending_flags_{0};    // Atomic flags for pending tasks
+
+  // Performance statistics
+  struct SleepStats {
+    std::atomic<uint64_t> sleep_count{0};         // Number of sleeps
+    std::atomic<uint64_t> wakeup_count{0};        // Number of wakeups
+    std::atomic<uint64_t> spin_count{0};          // Number of spin cycles
+    std::atomic<uint64_t> instant_wakeup_count{0}; // Wakeups during spin
+  } sleep_stats_;
+
+  // Helper methods for task flag management
+  inline void SetTaskFlag(uint64_t flag) {
+    auto old = task_pending_flags_.fetch_or(flag, std::memory_order_release);
+    if (!(old & flag)) {
+      // First time setting this flag
+      if (old == 0) {
+        // Was completely idle, wake one worker
+        worker_sleep_sem_.release();
+      }
+    }
+  }
+
+  inline void ClearTaskFlag(uint64_t flag) {
+    task_pending_flags_.fetch_and(~flag, std::memory_order_release);
+  }
+
+  inline bool HasAnyTask() const {
+    return task_pending_flags_.load(std::memory_order_acquire) != 0;
+  }
+
+  // Methods to check for specific work types
+  bool HasAnyWork() const;
+  bool HasAnyTPWork() const;
+  bool HasPendingCompactionSchedule() const;
+  bool HasCompactionWork() const;
   struct cqe_task {
     uint64_t count = 0;
     std::shared_ptr<compaction_task> task;
@@ -102,6 +148,11 @@ class ElasticLSMImpl : public ElasticLSM {
       del_task_list_.write(idx);
       elastic_lsm_->NotifyBGThreadCompactionSchedule();
     }
+
+    bool IsTaskListEmpty() const {
+      return tasks_list_.empty();
+    }
+
     // schedular put the highest priority task to compaction task slot
     // not thread safe, should be called by schedular thread only
     void schedule();
@@ -152,8 +203,8 @@ class ElasticLSMImpl : public ElasticLSM {
     void NewTask(int idx) { new_task_mask_.fetch_or(1 << idx); }
     // synchronize new tasks
     void sync();
-    // get lowest pass task
-    void work();
+    // get lowest pass task, return true if work was done
+    bool work();
 
    private:
     ElasticLSMImpl* elastic_lsm_;
@@ -183,25 +234,29 @@ class ElasticLSMImpl : public ElasticLSM {
   std::vector<std::unique_ptr<StrideSchedular>> stride_schedulars_;
 
   void NotifyBGThreadMaybeSchedule() {
+    SetTaskFlag(SCHEDULE_PENDING);
     maybe_schedule_count_++;
     schedule_count_.release();
   }
 
   void NotifyBGThreadCompactionSchedule() {
+    SetTaskFlag(COMPACTION_PENDING | SCHEDULE_PENDING);
     compaction_schedule_count_++;
     schedule_count_.release();
   }
 
   void NotifyBGThreadCompactionDoneWork() {
+    SetTaskFlag(COMPACTION_PENDING);
     compaction_done_work_count_++;
     schedule_count_.release();
   }
 
   bool CalcIfNeedTP() const {
-    if (tp_working_threads_num.load() == 0) {
+    int num = tp_working_threads_num.load();
+    if (num == 0) {
       return true;
     }
-    return tp_task_queue_.size() / tp_working_threads_num > tp_throughput_;
+    return tp_task_queue_.size() / num > tp_throughput_;
   }
 
   friend class DBImpl;

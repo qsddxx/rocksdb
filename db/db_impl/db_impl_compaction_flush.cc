@@ -2840,7 +2840,6 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
 }
 
 void DBImpl::BackgroundMaybeScheduleFlushOrCompaction() {
-  mutex_.Lock();
   TEST_SYNC_POINT("DBImpl::MaybeScheduleFlushOrCompaction:Start");
   if (!opened_successfully_) {
     // Compaction may introduce data race to DB open
@@ -2934,6 +2933,7 @@ void DBImpl::BackgroundMaybeScheduleFlushOrCompaction() {
     //                &DBImpl::UnscheduleCompactionCallback);
     elastic_lsm_impl_->ScheduleCompaction();
   }
+  mutex_.Unlock();
 }
 
 DBImpl::BGJobLimits DBImpl::GetBGJobLimits() const {
