@@ -68,57 +68,11 @@ class ElasticLSMImpl : public ElasticLSM {
   std::atomic<int> compaction_done_work_count_{0};
   // io_uring related
   io_uring* ring_;
-
-  // Smart sleep/wake mechanism for worker threads
-  enum TaskFlagBits : uint64_t {
-    TP_TASK_PENDING = 1ULL << 0,      // TP tasks pending
-    AP_TASK_PENDING = 1ULL << 1,      // AP tasks pending
-    COMPACTION_PENDING = 1ULL << 2,   // Compaction tasks pending
-    SCHEDULE_PENDING = 1ULL << 3,     // Schedule requests pending
-  };
-
-  std::counting_semaphore<> worker_sleep_sem_{0};  // Semaphore for worker sleep/wake
-  std::atomic<uint64_t> task_pending_flags_{0};    // Atomic flags for pending tasks
-
-  // Performance statistics
-  struct SleepStats {
-    std::atomic<uint64_t> sleep_count{0};         // Number of sleeps
-    std::atomic<uint64_t> wakeup_count{0};        // Number of wakeups
-    std::atomic<uint64_t> spin_count{0};          // Number of spin cycles
-    std::atomic<uint64_t> instant_wakeup_count{0}; // Wakeups during spin
-  } sleep_stats_;
-
-  // Helper methods for task flag management
-  inline void SetTaskFlag(uint64_t flag) {
-    auto old = task_pending_flags_.fetch_or(flag, std::memory_order_release);
-    if (!(old & flag)) {
-      // First time setting this flag
-      if (old == 0) {
-        // Was completely idle, wake one worker
-        worker_sleep_sem_.release();
-      }
-    }
-  }
-
-  inline void ClearTaskFlag(uint64_t flag) {
-    task_pending_flags_.fetch_and(~flag, std::memory_order_release);
-  }
-
-  inline bool HasAnyTask() const {
-    return task_pending_flags_.load(std::memory_order_acquire) != 0;
-  }
-
-  // Methods to check for specific work types
-  bool HasAnyWork() const;
-  bool HasAnyTPWork() const;
-  bool HasPendingCompactionSchedule() const;
-  bool HasCompactionWork() const;
   struct cqe_task {
     uint64_t count = 0;
     std::shared_ptr<compaction_task> task;
   };
   std::unordered_map<int, cqe_task> cqe_task_map_;
-
   // functions for threads
   void TPTask();
   void ContinuousTPTask();
@@ -127,16 +81,19 @@ class ElasticLSMImpl : public ElasticLSM {
   void CheckCQE();
   void BGSchedule();
 
+  bool HasAnyTPTask() const { return tp_task_queue_.size() > 0; };
+  bool HasAnyAPTask() const { return ap_task_queue_.size() > 0; };
+  bool HasCompactionTask() const {return compaction_tasks_mask_ != 0;};
+  bool HasAnyTask() const { return HasAnyAPTask() || HasAnyTPTask() || HasCompactionTask(); };
+
   // compaction and flush related
   std::array<std::shared_ptr<compaction_task>, SLOT_NUM> compaction_tasks_;
   slotmask compaction_tasks_mask_ = 0;
 
-  // folly::MPMCQueue<pausable_task*> flush_task_queue_;
-
   class CompactionSchedular {
    public:
     CompactionSchedular(ElasticLSMImpl* elastic_lsm)
-        : elastic_lsm_(elastic_lsm) {}
+        : elastic_lsm_(elastic_lsm), del_task_list_(64) {}
     // add and remove task to unschedulable list
     void AddTask(std::shared_ptr<compaction_task> task) {
       // int max_c = elastic_lsm_->options_.max_compaction_num;
@@ -149,9 +106,7 @@ class ElasticLSMImpl : public ElasticLSM {
       elastic_lsm_->NotifyBGThreadCompactionSchedule();
     }
 
-    bool IsTaskListEmpty() const {
-      return tasks_list_.empty();
-    }
+    bool IsTaskListEmpty() const { return tasks_list_.empty(); }
 
     // schedular put the highest priority task to compaction task slot
     // not thread safe, should be called by schedular thread only
@@ -166,9 +121,9 @@ class ElasticLSMImpl : public ElasticLSM {
                other.arrive_time + other.task->priority;
       }
     };
+    ElasticLSMImpl* elastic_lsm_;
     std::priority_queue<unscheduled_task> tasks_list_;
     folly::MPMCQueue<int> del_task_list_;
-    ElasticLSMImpl* elastic_lsm_;
     int time_ = 0;
   } schedular_;
 
@@ -234,19 +189,16 @@ class ElasticLSMImpl : public ElasticLSM {
   std::vector<std::unique_ptr<StrideSchedular>> stride_schedulars_;
 
   void NotifyBGThreadMaybeSchedule() {
-    SetTaskFlag(SCHEDULE_PENDING);
     maybe_schedule_count_++;
     schedule_count_.release();
   }
 
   void NotifyBGThreadCompactionSchedule() {
-    SetTaskFlag(COMPACTION_PENDING | SCHEDULE_PENDING);
     compaction_schedule_count_++;
     schedule_count_.release();
   }
 
   void NotifyBGThreadCompactionDoneWork() {
-    SetTaskFlag(COMPACTION_PENDING);
     compaction_done_work_count_++;
     schedule_count_.release();
   }

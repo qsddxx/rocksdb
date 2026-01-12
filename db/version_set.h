@@ -705,16 +705,10 @@ class VersionStorageInfo {
   void GenerateFiles() {
     for (int i = 0; i < num_segments_levels_; i++) {
       for (auto& s : segments_[i]) {
-        int num = s->files_.size();
-        if (num > level_per_segment_level_) {
-          // std::cerr << "The level " << i
-          //           << " has segment which has levels more than "
-          //           << level_per_segment_level_ << std::endl;
-          exit(0);
-        }
-        for (int j = 0; j < num; j++) {
+        assert(s->files_.size() <= (size_t)level_per_segment_level_);
+        for (size_t j = 0; j < s->files_.size(); j++) {
           for (auto f : s->files_[j]) {
-            files_[i * level_per_segment_level_ + j].emplace_back(f);
+            AddFile(i * level_per_segment_level_ + j, f);
           }
         }
       }

@@ -5011,6 +5011,7 @@ Env::WriteLifeTimeHint VersionStorageInfo::CalculateSSTWriteHint(
 
   switch (compaction_style_) {
     case kCompactionStyleLevel:
+    case kCompactionStyleSegment:
       if (level == 0) {
         return Env::WLTH_MEDIUM;
       }

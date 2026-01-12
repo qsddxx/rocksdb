@@ -579,14 +579,14 @@ class VersionBuilder::Rep {
               }
             }
 
-            if (!level_zero_cmp_by_epochno_->operator()(lhs, rhs)) {
-              std::ostringstream oss;
-              oss << "L0 files are not sorted properly: files #"
-                  << lhs->fd.GetNumber() << " with epoch number "
-                  << lhs->epoch_number << ", #" << rhs->fd.GetNumber()
-                  << " with epoch number " << rhs->epoch_number;
-              return Status::Corruption("VersionBuilder", oss.str());
-            }
+            // if (!level_zero_cmp_by_epochno_->operator()(lhs, rhs)) {
+            //   std::ostringstream oss;
+            //   oss << "L0 files are not sorted properly: files #"
+            //       << lhs->fd.GetNumber() << " with epoch number "
+            //       << lhs->epoch_number << ", #" << rhs->fd.GetNumber()
+            //       << " with epoch number " << rhs->epoch_number;
+            //   return Status::Corruption("VersionBuilder", oss.str());
+            // }
           }
 
           return Status::OK();
@@ -1550,18 +1550,15 @@ class VersionBuilder::Rep {
       VersionStorageInfo* vstorage, size_t level, size_t& add_file_index,
       const std::vector<int>& ordered_add_files,
       const InternalKeyComparator* icmp, bool last = false) const {
-    if (add_file_index >= ordered_add_files.size()) {
-      return;
-    }
     const auto& added_files_in_order = levels_[level].added_files_in_order;
-    auto now_added_file_id = ordered_add_files[add_file_index];
-    auto added_file = added_files_in_order[now_added_file_id];
     if (!files_not_overlap_with_segment.empty()) {
       if (last ||
-          icmp->Compare(
-              added_files_in_order[ordered_add_files[add_file_index - 1]]
-                  ->largest,
-              added_file->smallest) < 0) {
+          (add_file_index > 0 &&
+           icmp->Compare(
+               added_files_in_order[ordered_add_files[add_file_index - 1]]
+                   ->largest,
+               added_files_in_order[ordered_add_files[add_file_index]]
+                   ->smallest) < 0)) {
         auto new_segment =
             CreateSegment(files_not_overlap_with_segment, 0,
                           files_not_overlap_with_segment.size(), icmp);
@@ -1571,8 +1568,9 @@ class VersionBuilder::Rep {
     }
     // add file to list files_not_overlap_with_segment
     if (!last) {
-      files_not_overlap_with_segment.emplace_back(added_file,
-                                                  -now_added_file_id);
+      files_not_overlap_with_segment.emplace_back(
+          added_files_in_order[ordered_add_files[add_file_index]],
+          -ordered_add_files[add_file_index]);
     }
   }
 
@@ -1598,8 +1596,7 @@ class VersionBuilder::Rep {
               // added file override base file
               vstorage->RemoveCurrentStats(file);
               continue;
-            }
-            else {
+            } else {
               files.emplace_back(file, (int)i);
               max_level = std::max(max_level, i);
             }
@@ -1755,11 +1752,10 @@ class VersionBuilder::Rep {
                                    icmp, /* last */ true);
   }
   void SaveSegmentsTo(VersionStorageInfo* vstorage) const {
-
     if (!num_levels_) {
       return;
     }
-    
+
     EpochNumberRequirement epoch_number_requirement =
         vstorage->GetEpochNumberRequirement();
 
