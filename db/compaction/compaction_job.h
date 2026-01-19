@@ -187,7 +187,7 @@ class CompactionJob {
   // that, verify table is usable and finally do bookkeeping to unify
   // subcompaction results
   pausable_task Run(Status& status,
-                    std::shared_ptr<compaction_task> task_ptr = nullptr);
+                    compaction_task* task_ptr = nullptr);
 
   // REQUIRED: mutex held
   // Add compaction input/output to the current version
@@ -283,7 +283,7 @@ class CompactionJob {
   void ReleaseSubcompactionResources();
 
   void InitializeCompactionRun();
-  pausable_task RunSubcompactions(std::shared_ptr<compaction_task> task_ptr);
+  pausable_task RunSubcompactions(compaction_task* task_ptr);
   void UpdateTimingStats(uint64_t start_micros);
   void RemoveEmptyOutputs();
   bool HasNewBlobFiles() const;

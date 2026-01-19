@@ -14,6 +14,7 @@ struct task {
   task(task_type _type = TASK_TYPE_NONE, task* _prev_task = nullptr,
        task* _next_task = nullptr)
       : type(_type), prev_task(_prev_task), next_task(_next_task) {}
+  virtual ~task() = default;
 };
 
 struct tp_task : public task {
@@ -31,6 +32,7 @@ struct tp_task : public task {
           task_type _type = TASK_TYPE_TP, task* _prev_task = nullptr,
           task* _next_task = nullptr)
       : task(_type, _prev_task, _next_task), tp_type(_tp_type) {}
+  virtual ~tp_task() = default;
 };
 
 struct put_task : public tp_task {
@@ -166,7 +168,7 @@ struct pausable_task {
   }
   bool resume() {
     handle.resume();
-    return !done();
+    return done();
   }
   bool done() const { return handle.promise().done; }
 };
@@ -182,7 +184,7 @@ struct compaction_task {
   std::atomic<slotmask> coro_works_mask{0};
   std::atomic<int> done_works_count{0};
   std::optional<pausable_task> done_work;
-  bool done = false;
+  bool done = true;
   bool flush = false;
 };
 struct AsyncWriteOp {

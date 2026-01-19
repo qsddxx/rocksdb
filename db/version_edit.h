@@ -435,9 +435,10 @@ struct Segment {
     largest = files_[0][0]->largest;
     for (auto &i : files_) {
       smallest = cmp->Compare(smallest, i[0]->smallest) < 0 ? smallest : i[0]->smallest;
-      largest = cmp->Compare(largest, i.back()->largest) < 0 ? largest : i.back()->largest;
+      largest = cmp->Compare(largest, i.back()->largest) > 0 ? largest : i.back()->largest;
       for (auto &f : i) {
         file_size += f->fd.GetFileSize();
+        being_compacted |= f->being_compacted;
       }
       file_num_ += i.size();
     }
@@ -448,7 +449,7 @@ struct Segment {
   InternalKey smallest;
   InternalKey largest;
   bool being_compacted = false;
-  int refs = 1;
+  int refs = 0;
   uint64_t segment_id_;
   int file_num_ = 0;
   uint64_t file_size = 0;

@@ -631,11 +631,10 @@ class VersionStorageInfo {
   const Comparator* user_comparator() const { return user_comparator_; }
 
   // elastic related
-  
   int num_segments_levels() const { return num_segments_levels_; }
 
   int num_non_empty_segments_levels() const {
-    assert(finalized_);
+    // assert(finalized_);
     return num_non_empty_segments_levels_;
   }
 
@@ -651,11 +650,14 @@ class VersionStorageInfo {
     return segments_[level];
   }
 
-  const std::vector<Segment*>* GetSegments() const {
-    return segments_;
-  }
+  const std::vector<Segment*>* GetSegments() const { return segments_; }
 
   void AddSegment(int level, Segment* segment) {
+    if (segment == nullptr || segment->IsEmpty())
+    {
+      delete segment;
+      return;
+    }
     segments_[level].emplace_back(segment);
     segment->refs++;
   }
@@ -694,12 +696,20 @@ class VersionStorageInfo {
       }
     }
   }
-
-  std::pair<double, uint64_t> SegmentCompactionScore(int idx) const {
-    return segment_compaction_score_[idx];
+  
+  std::pair<double, uint64_t> CompactionLevelScore(int idx) const {
+    return compaction_level_score_[idx];
   }
-  int SegmentCompactionNum() const {
-    return static_cast<int>(segment_compaction_score_.size());
+
+  int CompactionLevelNum() const {
+    return static_cast<int>(compaction_level_score_.size());
+  }
+
+  std::pair<double, uint64_t> CompactionSegmentScore(int idx) const {
+    return compaction_segment_score_[idx];
+  }
+  int CompactionSegmentNum() const {
+    return static_cast<int>(compaction_segment_score_.size());
   }
 
   void GenerateFiles() {
@@ -709,6 +719,9 @@ class VersionStorageInfo {
         for (size_t j = 0; j < s->files_.size(); j++) {
           for (auto f : s->files_[j]) {
             AddFile(i * level_per_segment_level_ + j, f);
+            segments_level_file_counts_[i]++;
+            segments_level_file_sizes_[i] +=
+                f->fd.GetFileSize();
           }
         }
       }
@@ -721,12 +734,13 @@ class VersionStorageInfo {
     // compaction_level_.resize(num_levels_);
     // compact_cursor_.resize(num_levels_);
   }
-  bool ShouldLevelTrivialMove(const MutableCFOptions& options_, int level) {
+  double ShouldLevelTrivialMove(const MutableCFOptions& options_,
+                                int level) const {
     if (level == 0) {
-      return segments_level_file_counts_[level] >=
+      return 1.0 * segments_level_file_counts_[level] /
              options_.level0_file_num_compaction_trigger;
     } else {
-      return segments_level_file_size_[level] >= level_max_bytes_[level];
+      return 1.0 * segments_level_file_sizes_[level] / level_max_bytes_[level];
     }
   }
 
@@ -892,11 +906,12 @@ class VersionStorageInfo {
   int num_non_empty_segments_levels_;
   std::vector<Segment*>* segments_;
   std::vector<int> segments_level_file_counts_;
-  std::vector<uint64_t> segments_level_file_size_;
+  std::vector<uint64_t> segments_level_file_sizes_;
   // FileLocations file_location_in_segment;
   UnorderedMap<uint64_t, FileLocation> segment_locations_;
   std::unordered_map<uint64_t, uint64_t> file_to_segment;
-  std::vector<std::pair<double, uint64_t>> segment_compaction_score_;
+  std::vector<std::pair<double, uint64_t>> compaction_level_score_;
+  std::vector<std::pair<double, uint64_t>> compaction_segment_score_;
 
   friend class Version;
   friend class VersionSet;
@@ -1463,9 +1478,7 @@ class VersionSet {
   // Allocate and return a new file number
   uint64_t NewFileNumber() { return next_file_number_.fetch_add(1); }
   uint64_t NewSegmentNumber() { return next_segment_number_.fetch_add(1); }
-  int NewCompactionNumber() {
-    return next_compaction_number_.fetch_add(1);
-  }
+  int NewCompactionNumber() { return next_compaction_number_.fetch_add(1); }
 
   // Fetch And Add n new file number
   uint64_t FetchAddFileNumber(uint64_t n) {

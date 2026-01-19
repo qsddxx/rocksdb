@@ -868,7 +868,7 @@ Version::~Version() {
       }
     }
   }
-  for (int level = 0; level < storage_info_.num_segments_levels_; level++)
+  for (int level = 0; level < storage_info_.num_segments_levels_; level++) {
     for (size_t i = 0; i < storage_info_.segments_[level].size(); i++) {
       Segment* s = storage_info_.segments_[level][i];
       assert(s->refs > 0);
@@ -877,6 +877,7 @@ Version::~Version() {
         delete s;
       }
     }
+  }
 }
 
 int FindFile(const InternalKeyComparator& icmp,
@@ -2255,7 +2256,9 @@ VersionStorageInfo::VersionStorageInfo(
       level_per_segment_level_(level_per_segment_level),
       num_segments_levels_(levels),
       num_non_empty_segments_levels_(0),
-      segments_(new std::vector<Segment*>[num_levels_]) {
+      segments_(new std::vector<Segment*>[num_levels_]),
+      segments_level_file_counts_(num_levels_),
+      segments_level_file_sizes_(num_levels_) {
   if (ref_vstorage != nullptr) {
     accumulated_file_size_ = ref_vstorage->accumulated_file_size_;
     accumulated_raw_key_size_ = ref_vstorage->accumulated_raw_key_size_;
@@ -3167,6 +3170,108 @@ void VersionStorageInfo::PrepareForVersionAppend(
   GenerateSegmentRelatedIndex();
 }
 
+namespace {
+
+// Static counter to track version changes for debug output
+static std::atomic<uint64_t> version_change_counter{0};
+
+// Debug print function for VersionStorageInfo
+// Prints files and segments information in a readable format
+// Segments are cross-layer structures that span multiple sub-levels
+std::string PrintVersionStorageDebug(const VersionStorageInfo* vstorage,
+                                     bool has_changes) {
+  std::string output;
+  // Only print if there are actual changes
+  if (!has_changes) {
+    return "";
+  }
+
+  if (vstorage->num_non_empty_segments_levels() == 0) {
+    return "";
+  }
+
+  output.append("========== VersionStorage Debug Info ==========\n");
+
+  // Iterate through segment levels, not regular levels
+  // Segments span across multiple sub-levels within each segment level
+  for (int seg_level = 0; seg_level < vstorage->num_non_empty_segments_levels();
+       ++seg_level) {
+    const auto& segments = vstorage->GetLevelSegments(seg_level);
+
+    if (segments.empty()) {
+      continue;
+    }
+
+    output.append("=== Segment Level " + std::to_string(seg_level) + " ===\n");
+
+    // Print each segment in this segment level
+    // uint64_t prev_segment_id = UINT64_MAX;
+
+    for (size_t seg_idx = 0; seg_idx < segments.size(); ++seg_idx) {
+      const Segment* seg = segments[seg_idx];
+      if (!seg) continue;
+
+      uint64_t current_segment_id = seg->segment_id_;
+
+      // Print separator between different segments
+      // if (seg_idx > 0 && current_segment_id != prev_segment_id) {
+      //   printf("  ---\n");
+      // }
+      // prev_segment_id = current_segment_id;
+
+      // Calculate segment statistics
+      size_t total_files = 0;
+      uint64_t total_size = 0;
+
+      for (const auto& file_list : seg->files_) {
+        for (FileMetaData* f : file_list) {
+          total_files++;
+          total_size += f->fd.GetFileSize();
+        }
+      }
+
+      output.append("  Segment " + std::to_string(current_segment_id) + " (" +
+                    std::to_string(total_files) + " files, " +
+                    std::to_string(total_size) + " bytes) " +
+                    (seg->being_compacted ? "x" : " ") + ":\n");
+
+      // Print files in this segment, organized by sub-level
+      // seg->files_[j] contains files for sub-level j
+      for (size_t sub_level = 0; sub_level < seg->files_.size(); ++sub_level) {
+        const auto& file_list = seg->files_[sub_level];
+
+        if (file_list.empty()) {
+          continue;
+        }
+
+        for (FileMetaData* f : file_list) {
+          // Use user_key() to get the actual user key content (not internal
+          // key)
+          Slice smallest_key = f->smallest.user_key();
+          Slice largest_key = f->largest.user_key();
+          uint64_t file_size = f->fd.GetFileSize();
+          uint64_t file_number = f->fd.GetNumber();
+
+          output.append("    [" + std::to_string(file_number) + ".sst] \"" +
+                        std::string(smallest_key.data(), smallest_key.size()) +
+                        "\" ~ \"" +
+                        std::string(largest_key.data(), largest_key.size()) +
+                        "\" (" + std::to_string(file_size) + ") " +
+                        (f->being_compacted ? "x" : " ") + "\n");
+        }
+        if (sub_level + 1 < seg->files_.size()) {
+          output.append("    ---\n");
+        }
+      }
+    }
+  }
+
+  output.append("================================================\n");
+  return output;
+}
+
+}  // anonymous namespace
+
 void Version::PrepareAppend(const ReadOptions& read_options,
                             bool update_stats) {
   TEST_SYNC_POINT_CALLBACK(
@@ -3178,6 +3283,15 @@ void Version::PrepareAppend(const ReadOptions& read_options,
   }
 
   storage_info_.PrepareForVersionAppend(cfd_->ioptions(), mutable_cf_options_);
+#ifndef NDEBUG
+  // Debug output after PrepareForVersionAppend
+  // update_stats being true typically indicates there are changes to process
+  std::string debug_info =
+      PrintVersionStorageDebug(&storage_info_, update_stats);
+  if (!debug_info.empty()) {
+    ROCKS_LOG_DEBUG(vset_->db_options_->info_log, "%s", debug_info.c_str());
+  }
+#endif
 }
 
 bool Version::MaybeInitializeFileMetaData(const ReadOptions& read_options,
@@ -3501,8 +3615,10 @@ bool ShouldChangeFileTemperature(const ImmutableOptions& ioptions,
 
 void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableOptions& immutable_options,
-    const MutableCFOptions& /*mutable_cf_options*/) {
+    const MutableCFOptions& mutable_cf_options) {
   for (int i = 0; i < num_segments_levels_; i++) {
+    compaction_level_score_.emplace_back(
+        ShouldLevelTrivialMove(mutable_cf_options, i), i);
     for (auto& segment_ : segments_[i]) {
       if (segment_->being_compacted) {
         continue;
@@ -3512,14 +3628,18 @@ void VersionStorageInfo::ComputeCompactionScore(
           immutable_options.level_segment_max_sorted_run_num[i]) {
         double score = 1.0 * segment_level /
                        immutable_options.level_segment_max_sorted_run_num[i];
-        segment_compaction_score_.emplace_back(score, segment_->segment_id_);
+        compaction_segment_score_.emplace_back(score, segment_->segment_id_);
       }
     }
   }
-  std::sort(
-      segment_compaction_score_.begin(), segment_compaction_score_.end(),
-      [](const std::pair<double, uint64_t>& a,
-         const std::pair<double, uint64_t>& b) { return a.first > b.first; });
+  auto sort_fn = [](const std::pair<double, uint64_t>& a,
+                    const std::pair<double, uint64_t>& b) {
+    return a.first > b.first;
+  };
+  std::sort(compaction_level_score_.begin(), compaction_level_score_.end(),
+            sort_fn);
+  std::sort(compaction_segment_score_.begin(), compaction_segment_score_.end(),
+            sort_fn);
   /*****
   double total_downcompact_bytes = 0.0;
   // Historically, score is defined as actual bytes in a level divided by
@@ -4021,15 +4141,15 @@ void VersionStorageInfo::UpdateNumNonEmptyLevels() {
   num_non_empty_levels_ = num_levels_;
   for (int i = num_levels_ - 1; i >= 0; i--) {
     if (files_[i].size() != 0) {
-      return;
+      break;
     } else {
       num_non_empty_levels_ = i;
     }
   }
-  num_non_empty_segments_levels_ = num_levels_;
+  num_non_empty_segments_levels_ = num_segments_levels_;
   for (int i = num_segments_levels_ - 1; i >= 0; i--) {
     if (segments_[i].size() != 0) {
-      return;
+      break;
     } else {
       num_non_empty_segments_levels_ = i;
     }

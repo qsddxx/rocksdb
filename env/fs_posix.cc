@@ -1364,6 +1364,7 @@ PosixFileSystem::PosixFileSystem()
   }
 #endif
   int queue_depth = 1024;
+  std::memset(&params, 0, sizeof(params));
   io_uring_queue_init_params(queue_depth, &ring_base, &params);
 }
 

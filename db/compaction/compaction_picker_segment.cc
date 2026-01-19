@@ -11,18 +11,28 @@
 namespace ROCKSDB_NAMESPACE {
 bool SegmentCompactionPicker::NeedsCompaction(
     const VersionStorageInfo* vstorage) const {
-  for (int i = 0; i < vstorage->SegmentCompactionNum(); i++) {
-    auto segment_compaction_score = vstorage->SegmentCompactionScore(i);
-    if (segment_compaction_score.first >= 1.0 &&
-        !vstorage->GetSegmentById(segment_compaction_score.second)
-             ->being_compacted) {
+  for (int i = 0; i < vstorage->CompactionLevelNum(); i++) {
+    if (vstorage->CompactionLevelScore(i).first >= 1.0) {
       return true;
+    } else {
+      break;
     }
   }
-  if (vstorage->SegmentCompactionNum() == 0) {
+  if (vstorage->CompactionSegmentNum() == 0) {
     return false;
   }
-  return vstorage->SegmentCompactionScore(0).first >= 1.0;
+  for (int i = 0; i < vstorage->CompactionSegmentNum(); i++) {
+    auto segment_compaction_score = vstorage->CompactionSegmentScore(i);
+    if (segment_compaction_score.first >= 1.0) {
+      if (!vstorage->GetSegmentById(segment_compaction_score.second)
+               ->being_compacted) {
+        return true;
+      }
+    } else {
+      break;
+    }
+  }
+  return false;
 }
 namespace {
 class SegmentCompactionBuilder {
@@ -66,29 +76,49 @@ class SegmentCompactionBuilder {
 Compaction* SegmentCompactionBuilder::PickCompaction() {
   std::vector<FileMetaData*> compaction_filelist;
   // find **first**(need random?) file to trivial move
-  for (int i = 0; i < vstorage_->num_non_empty_segments_levels(); i++) {
-    if (vstorage_->ShouldLevelTrivialMove(mutable_cf_options_, i)) {
-      auto& level_segment = vstorage_->GetLevelSegments(i);
-      for (auto& segment_ : level_segment) {
-        if (segment_->being_compacted || segment_->IsEmpty()) {
+  // find first level with score >=1
+  for (int i = 0; i < vstorage_->CompactionLevelNum(); i++) {
+    auto level_compaction_score = vstorage_->CompactionLevelScore(i);
+    segment_score_ = level_compaction_score.first;
+    if (segment_score_ >= 1.0) {
+      auto level = level_compaction_score.second;
+      auto& level_segment = vstorage_->GetLevelSegments(level);
+      int max_idx = 0;
+      for (size_t idx = 0; idx < level_segment.size(); idx++) {
+        auto segment = level_segment[idx];
+        if (segment->being_compacted || segment->IsEmpty()) {
           continue;
         }
-        segment_->being_compacted = true;
-        inputs_.resize(1);
-        inputs_[0].files.emplace_back(segment_->files_.back()[0]);
-        inputs_[0].level = i;
-        output_level_ = i + 1;
-        total_size = inputs_[0].files[0]->fd.GetFileSize();
-        num_files = 1;
-        return OutputCompaction(true);
+        if (segment->file_num_ > level_segment[max_idx]->file_num_) {
+          max_idx = idx;
+        }
       }
+      auto biggest_segment = level_segment[max_idx];
+      if (biggest_segment->being_compacted) {
+        continue;
+      }
+      biggest_segment->being_compacted = true;
+      inputs_.resize(1);
+      int down_file_id = Random(ioptions_.clock->NowMicros())
+                             .Uniform(biggest_segment->files_.back().size());
+      inputs_[0].files.emplace_back(
+          biggest_segment->files_.back()[down_file_id]);
+      inputs_[0].level = level;
+      output_level_ = level + 1;
+      total_size = inputs_[0].files[0]->fd.GetFileSize();
+      num_files = 1;
+      return OutputCompaction(true);
+    } else {
+      // Compaction scores are sorted in descending order, no further scores
+      // will be >= 1.
+      break;
     }
   }
   // find first level with score >=1
-  for (int i = 0; i < vstorage_->SegmentCompactionNum(); i++) {
-    auto segment_compaction_score = vstorage_->SegmentCompactionScore(i);
+  for (int i = 0; i < vstorage_->CompactionSegmentNum(); i++) {
+    auto segment_compaction_score = vstorage_->CompactionSegmentScore(i);
     segment_score_ = segment_compaction_score.first;
-    if (segment_score_ >= 1) {
+    if (segment_score_ >= 1.0) {
       auto segment_id = segment_compaction_score.second;
       Segment* segment = vstorage_->GetSegmentById(segment_id);
       if (segment->being_compacted) {
@@ -158,7 +188,8 @@ uint32_t SegmentCompactionBuilder::GetPathId(
 }
 }  // namespace
 Compaction* SegmentCompactionPicker::PickCompaction(
-    const std::string& /* cf_name */, const MutableCFOptions& mutable_cf_options,
+    const std::string& /* cf_name */,
+    const MutableCFOptions& mutable_cf_options,
     const MutableDBOptions& mutable_db_options,
     const std::vector<SequenceNumber>& /*existing_snapshots */,
     const SnapshotChecker* /*snapshot_checker*/, VersionStorageInfo* vstorage,

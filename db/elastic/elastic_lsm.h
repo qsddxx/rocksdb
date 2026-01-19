@@ -6,10 +6,10 @@
 
 #include <bit>
 #include <semaphore>
-#include "liburing.h"
 
 #include "db/db_impl/db_impl.h"
 #include "db/elastic/task.h"
+#include "liburing.h"
 #include "rocksdb/elastic_lsm.h"
 
 namespace ROCKSDB_NAMESPACE {
@@ -50,7 +50,8 @@ class ElasticLSMImpl : public ElasticLSM {
   ElasticLSMOptions options_;
   DBImpl* db_;
   std::vector<std::thread> worker_thread_pool_;
-  std::vector<std::thread> tp_thread_pool_;  // Dedicated TP task threads
+  std::vector<std::thread> tp_thread_pool_;
+  std::vector<std::thread> compaction_thread_pool_;
   std::vector<std::thread> schedular_thread_pool_;
   SystemClock* clock_;
   // tp related
@@ -71,20 +72,25 @@ class ElasticLSMImpl : public ElasticLSM {
   struct cqe_task {
     uint64_t count = 0;
     std::shared_ptr<compaction_task> task;
+    std::atomic<uint64_t>* compaction_write_num_count;
   };
   std::unordered_map<int, cqe_task> cqe_task_map_;
   // functions for threads
   void TPTask();
   void ContinuousTPTask();
+  void ContinuousCompactionTask(int idx);
   pausable_task APTask();
   void BGWork(int idx);
+  void UpdateCQEMap(int compaction_id, std::shared_ptr<compaction_task> task, AsyncWriteOp* req = nullptr);
   void CheckCQE();
   void BGSchedule();
 
   bool HasAnyTPTask() const { return tp_task_queue_.size() > 0; };
   bool HasAnyAPTask() const { return ap_task_queue_.size() > 0; };
-  bool HasCompactionTask() const {return compaction_tasks_mask_ != 0;};
-  bool HasAnyTask() const { return HasAnyAPTask() || HasAnyTPTask() || HasCompactionTask(); };
+  bool HasCompactionTask() const { return compaction_tasks_mask_ != 0; };
+  bool HasAnyTask() const {
+    return HasAnyAPTask() || HasAnyTPTask() || HasCompactionTask();
+  };
 
   // compaction and flush related
   std::array<std::shared_ptr<compaction_task>, SLOT_NUM> compaction_tasks_;
@@ -138,16 +144,17 @@ class ElasticLSMImpl : public ElasticLSM {
     task->coro_works_count = 1;
     task->coro_handles.emplace_back(Flush());
     task->flush = true;
+    task->done = false;
     schedular_.AddTask(task);
   }
 
   void ScheduleCompaction() {
     std::shared_ptr<compaction_task> task = std::make_shared<compaction_task>();
     task->done_work.emplace(
-        db_->BackgroundCallCompaction(nullptr, Env::Priority::LOW, task));
+        db_->BackgroundCallCompaction(nullptr, Env::Priority::LOW, task.get()));
     task->done_work->resume();
     task->coro_works_count = task->coro_handles.size();
-    schedular_.AddTask(task);
+    if (!task->done) schedular_.AddTask(task);
   }
 
   class StrideSchedular {
@@ -160,6 +167,7 @@ class ElasticLSMImpl : public ElasticLSM {
     void sync();
     // get lowest pass task, return true if work was done
     bool work();
+    bool compaction();
 
    private:
     ElasticLSMImpl* elastic_lsm_;
@@ -181,6 +189,7 @@ class ElasticLSMImpl : public ElasticLSM {
     std::priority_queue<int, std::vector<int>, priority_cmp> task_queue_;
     std::list<int> to_reinsert_task_queue_;
 
+    void remove_done_work(int idx);
     bool docompaction(bool highpriority);
     // put back task to queue
     void put_back_task();

@@ -1108,7 +1108,8 @@ class DBImpl : public DB {
                      std::vector<ColumnFamilyHandle*>* handles,
                      std::unique_ptr<DB>* dbptr, const bool seq_per_batch,
                      const bool batch_per_txn, const bool is_retry,
-                     bool* can_retry, ElasticLSMImpl* elastic_lsm_impl = nullptr);
+                     bool* can_retry,
+                     ElasticLSMImpl* elastic_lsm_impl = nullptr);
 
   static IOStatus CreateAndNewDirectory(
       FileSystem* fs, const std::string& dirname,
@@ -2464,13 +2465,15 @@ class DBImpl : public DB {
   static void UnscheduleFlushCallback(void* arg);
   pausable_task BackgroundCallCompaction(
       PrepickedCompaction* prepicked_compaction, Env::Priority thread_pri,
-      std::shared_ptr<compaction_task> task_ptr = nullptr);
+      compaction_task* task_ptr = nullptr);
   void BackgroundCallFlush(Env::Priority thread_pri);
   void BackgroundCallPurge();
-  pausable_task BackgroundCompaction(
-      bool* madeProgress, JobContext* job_context, LogBuffer* log_buffer,
-      PrepickedCompaction* prepicked_compaction, Env::Priority thread_pri,
-      Status& status, std::shared_ptr<compaction_task> task_ptr = nullptr);
+  pausable_task BackgroundCompaction(bool* madeProgress,
+                                     JobContext* job_context,
+                                     LogBuffer* log_buffer,
+                                     PrepickedCompaction* prepicked_compaction,
+                                     Env::Priority thread_pri, Status& status,
+                                     compaction_task* task_ptr = nullptr);
   Status BackgroundFlush(bool* madeProgress, JobContext* job_context,
                          LogBuffer* log_buffer, FlushReason* reason,
                          bool* flush_rescheduled_to_retain_udt,

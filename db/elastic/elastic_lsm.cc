@@ -84,8 +84,8 @@ Status ElasticLSMImpl::Open(const Options& options,
 
 ElasticLSMImpl::ElasticLSMImpl(const ElasticLSMOptions& elastic_options)
     : options_(elastic_options),
-      tp_task_queue_(131072),
-      ap_task_queue_(131072),
+      tp_task_queue_(options_.max_tp_task_queue),
+      ap_task_queue_(options_.max_tp_task_queue),
       compaction_done_work_queue_(1024),
       schedular_(this) {}
 
@@ -104,6 +104,11 @@ ElasticLSMImpl::~ElasticLSMImpl() {
       t.join();
     }
   }
+  for (auto& t : compaction_thread_pool_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
   for (auto& t : schedular_thread_pool_) {
     if (t.joinable()) {
       t.join();
@@ -113,15 +118,18 @@ ElasticLSMImpl::~ElasticLSMImpl() {
 
 void ElasticLSMImpl::StartThreads() {
   schedular_thread_pool_.emplace_back(&ElasticLSMImpl::BGSchedule, this);
-  // Start dedicated TP task threads FIRST to ensure tp_working_threads_num > 0
   for (int i = 0; i < options_.min_tp_threads; ++i) {
     tp_thread_pool_.emplace_back(&ElasticLSMImpl::ContinuousTPTask, this);
   }
-  // BGWork threads: max_background_threads minus min_tp_threads
   int bg_work_threads =
       options_.max_background_threads - options_.min_tp_threads;
   stride_schedulars_.reserve(bg_work_threads);
-  for (int i = 0; i < bg_work_threads; ++i) {
+  for (int i = 0; i < options_.min_compaction_threads; ++i) {
+    stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
+    compaction_thread_pool_.emplace_back(
+        &ElasticLSMImpl::ContinuousCompactionTask, this, i);
+  }
+  for (int i = options_.min_compaction_threads; i < bg_work_threads; ++i) {
     stride_schedulars_.emplace_back(std::make_unique<StrideSchedular>(this));
     worker_thread_pool_.emplace_back(&ElasticLSMImpl::BGWork, this, i);
   }
@@ -244,6 +252,12 @@ void ElasticLSMImpl::ContinuousTPTask() {
   tp_working_threads_num--;
 }
 
+void ElasticLSMImpl::ContinuousCompactionTask(int idx) {
+  while (!closed_) {
+    stride_schedulars_[idx]->compaction();
+  }
+}
+
 pausable_task ElasticLSMImpl::APTask() {
   // if (task) {
   //   // Perform range scanning using iterators and process each result through
@@ -275,6 +289,40 @@ void ElasticLSMImpl::BGWork(int idx) {
     stride_schedulars_[idx]->work();
   }
 }
+void ElasticLSMImpl::UpdateCQEMap(int compaction_id,
+                                  std::shared_ptr<compaction_task> task,
+                                  AsyncWriteOp* req) {
+  auto it = cqe_task_map_.find(compaction_id);
+  if (it == cqe_task_map_.end()) {
+    if (task != nullptr) {
+      it = cqe_task_map_.emplace(compaction_id, cqe_task{0, task, nullptr})
+               .first;
+    } else {
+      it = cqe_task_map_
+               .emplace(compaction_id,
+                        cqe_task{1, nullptr, req->compaction_write_num_count})
+               .first;
+    }
+  } else {
+    if (task != nullptr) {
+      it->second.task = task;
+    } else {
+      it->second.count++;
+      if (it->second.compaction_write_num_count == nullptr) {
+        it->second.compaction_write_num_count = req->compaction_write_num_count;
+      }
+    }
+  }
+  if (it->second.task != nullptr &&
+      it->second.compaction_write_num_count != nullptr &&
+      it->second.count == it->second.compaction_write_num_count->load()) {
+    std::printf("Compaction %d io_uring write done with %ld writes\n",
+                compaction_id, it->second.count);
+    it->second.task->done_work->resume();
+    delete it->second.compaction_write_num_count;
+    cqe_task_map_.erase(it);
+  }
+}
 void ElasticLSMImpl::CheckCQE() {
   struct io_uring_cqe* cqe;
   while (io_uring_peek_cqe(ring_, &cqe) == 0) {
@@ -283,13 +331,7 @@ void ElasticLSMImpl::CheckCQE() {
       fprintf(stderr, "write failed: %s\n", strerror(-cqe->res));
     }
     int compaction_id = req->compaction_id;
-    auto it = cqe_task_map_.find(compaction_id);
-    it->second.count++;
-    if (it->second.count == req->compaction_write_num_count->load()) {
-      it->second.task->done_work->resume();
-      cqe_task_map_.erase(it);
-      delete req->compaction_write_num_count;
-    }
+    UpdateCQEMap(compaction_id, nullptr, req);
     delete req;
     io_uring_cqe_seen(ring_, cqe);
   }
@@ -299,7 +341,7 @@ void ElasticLSMImpl::BGSchedule() {
     if (!cqe_task_map_.empty())
       CheckCQE();
     else
-      schedule_count_.acquire();
+      schedule_count_.try_acquire_for(std::chrono::milliseconds(100));
     if (compaction_schedule_count_) {
       compaction_schedule_count_--;
       schedular_.schedule();
@@ -308,14 +350,12 @@ void ElasticLSMImpl::BGSchedule() {
       int task_id;
       compaction_done_work_queue_.read(task_id);
       if (!compaction_tasks_[task_id]->flush) {
-        int compaction_id = compaction_tasks_[task_id]->compaction_id;
-        cqe_task_map_.emplace(compaction_id,
-                              cqe_task{0, compaction_tasks_[task_id]});
+        UpdateCQEMap(compaction_tasks_[task_id]->compaction_id,
+                     compaction_tasks_[task_id]);
       }
       schedular_.RemoveTask(task_id);
     } else if (maybe_schedule_count_) {
       maybe_schedule_count_--;
-      db_->mutex_.Lock();
       db_->BackgroundMaybeScheduleFlushOrCompaction();
     }
   }
@@ -344,13 +384,14 @@ void ElasticLSMImpl::CompactionSchedular::schedule() {
 void ElasticLSMImpl::StrideSchedular::sync() {
   while (new_task_mask_ != 0) {
     int idx = std::countr_zero(new_task_mask_.load());
+    new_task_mask_.fetch_and(~(1 << idx));
+    active_task_mask_ |= 1 << idx;
     compaction_tasks_[idx] = elastic_lsm_->compaction_tasks_[idx];
+    if (compaction_tasks_[idx] == nullptr) continue;
     pass_[idx] = global_pass_;
     task_queue_.push(idx);
-    active_task_mask_ |= 1 << idx;
-    new_task_mask_.fetch_and(~(1 << idx));
     if (compaction_tasks_[idx]->priority == 0) {
-      pass_[idx] -= 1000.0;
+      pass_[idx] = -1000.0;
     }
   }
 }
@@ -387,31 +428,50 @@ bool ElasticLSMImpl::StrideSchedular::work() {
   // No work found
   return false;
 }
+bool ElasticLSMImpl::StrideSchedular::compaction() {
+  sync();
+  return docompaction(false);
+}
+void ElasticLSMImpl::StrideSchedular::remove_done_work(int idx) {
+  compaction_tasks_[idx] = nullptr;
+  to_reinsert_task_queue_.pop_back();
+}
 bool ElasticLSMImpl::StrideSchedular::docompaction(bool highpriority) {
+  assert(to_reinsert_task_queue_.empty());
   while (!task_queue_.empty()) {
     int idx = task_queue_.top();
-    if (highpriority && compaction_tasks_[idx]->priority != 0) {
+    auto& task = compaction_tasks_[idx];
+    if (task == nullptr) {
+      task_queue_.pop();
+      continue;
+    }
+    if (highpriority && task->priority != 0) {
       break;
     }
     task_queue_.pop();
-    to_reinsert_task_queue_.push_back(idx);
-    auto task = compaction_tasks_[idx];
     if (task->done) {
-      active_task_mask_ &= ~(1 << idx);
       compaction_tasks_[idx] = nullptr;
-      to_reinsert_task_queue_.pop_back();
       continue;
     }
+    to_reinsert_task_queue_.push_back(idx);
     auto mask = task->coro_works_mask.load();
     int coro_idx = std::countr_one(mask);
-    if (coro_idx >= task->coro_works_count) continue;
+    if (coro_idx >= task->coro_works_count) {
+      if (task->priority == 0) {
+        remove_done_work(idx);
+      }
+      continue;
+    }
     if (task->coro_works_mask.compare_exchange_weak(mask,
                                                     mask | (1 << coro_idx))) {
       // work
-      task->coro_handles[coro_idx].resume();
+      while (!task->coro_handles[coro_idx].resume() && task->priority == 0) {
+        // if preempt, keep working
+      }
       if (task->coro_handles[coro_idx].done()) {
         if (task->done_works_count.fetch_add(1) == task->coro_works_count - 1) {
           task->done = true;
+          remove_done_work(idx);
           elastic_lsm_->compaction_done_work_queue_.write(idx);
           elastic_lsm_->NotifyBGThreadCompactionDoneWork();
         }
@@ -426,9 +486,14 @@ bool ElasticLSMImpl::StrideSchedular::docompaction(bool highpriority) {
   return false;
 }
 void ElasticLSMImpl::StrideSchedular::put_back_task() {
-  while (!task_queue_.empty() &&
-         compaction_tasks_[task_queue_.top()]->priority == 0) {
-    to_reinsert_task_queue_.push_back(task_queue_.top());
+  while (!task_queue_.empty()) {
+    auto& task = compaction_tasks_[task_queue_.top()];
+    if (task != nullptr) {
+      if (task->priority != 0) {
+        break;
+      }
+      to_reinsert_task_queue_.push_back(task_queue_.top());
+    }
     task_queue_.pop();
   }
   if (!task_queue_.empty())
@@ -437,12 +502,15 @@ void ElasticLSMImpl::StrideSchedular::put_back_task() {
     global_pass_ = std::numeric_limits<double>::max();
   while (!to_reinsert_task_queue_.empty()) {
     int idx = to_reinsert_task_queue_.front();
-    if (compaction_tasks_[idx]->priority > 0) {
-      pass_[idx] += 1.0 / compaction_tasks_[idx]->priority;
-      global_pass_ = std::min(global_pass_, pass_[idx]);
-    }
     to_reinsert_task_queue_.pop_front();
-    task_queue_.push(idx);
+    auto& task = compaction_tasks_[idx];
+    if (task != nullptr) {
+      if(task->priority > 0) {
+        pass_[idx] += 1.0 / task->priority;
+        global_pass_ = std::min(global_pass_, pass_[idx]);
+      }
+      task_queue_.push(idx);
+    }
   }
   if (global_pass_ == std::numeric_limits<double>::max()) {
     global_pass_ = 0;

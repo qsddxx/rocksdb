@@ -2841,6 +2841,7 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
 
 void DBImpl::BackgroundMaybeScheduleFlushOrCompaction() {
   TEST_SYNC_POINT("DBImpl::MaybeScheduleFlushOrCompaction:Start");
+  mutex_.Lock();
   if (!opened_successfully_) {
     // Compaction may introduce data race to DB open
     return;
@@ -2931,7 +2932,9 @@ void DBImpl::BackgroundMaybeScheduleFlushOrCompaction() {
     unscheduled_compactions_--;
     // env_->Schedule(&DBImpl::BGWorkCompaction, ca, Env::Priority::LOW, this,
     //                &DBImpl::UnscheduleCompactionCallback);
+    mutex_.Unlock();
     elastic_lsm_impl_->ScheduleCompaction();
+    mutex_.Lock();
   }
   mutex_.Unlock();
 }
@@ -3420,7 +3423,7 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
 
 pausable_task DBImpl::BackgroundCallCompaction(
     PrepickedCompaction* prepicked_compaction, Env::Priority bg_thread_pri,
-    std::shared_ptr<compaction_task> task_ptr) {
+    compaction_task* task_ptr) {
   bool made_progress = false;
   JobContext job_context(next_job_id_.fetch_add(1), true);
   TEST_SYNC_POINT("BackgroundCallCompaction:0");
@@ -3555,7 +3558,7 @@ pausable_task DBImpl::BackgroundCallCompaction(
 pausable_task DBImpl::BackgroundCompaction(
     bool* made_progress, JobContext* job_context, LogBuffer* log_buffer,
     PrepickedCompaction* prepicked_compaction, Env::Priority thread_pri,
-    Status& status, std::shared_ptr<compaction_task> task_ptr) {
+    Status& status, compaction_task* task_ptr) {
   ManualCompactionState* manual_compaction =
       prepicked_compaction == nullptr
           ? nullptr
@@ -3806,7 +3809,6 @@ pausable_task DBImpl::BackgroundCompaction(
       }
     }
   }
-  task_ptr->priority = c->output_level();
 
   IOStatus io_s;
   bool compaction_released = false;
@@ -4233,6 +4235,8 @@ pausable_task DBImpl::BackgroundCompaction(
     InitSnapshotContext(job_context);
     assert(is_snapshot_supported_ || snapshots_.empty());
 
+    task_ptr->priority = c->output_level();
+    task_ptr->done = false;
     auto compaction_id = versions_->NewCompactionNumber();
     CompactionJob compaction_job(
         job_context->job_id, c.get(), immutable_db_options_,
@@ -4271,7 +4275,7 @@ pausable_task DBImpl::BackgroundCompaction(
     }
 
     // Should handle error?
-    auto task = compaction_job.Run(status);
+    auto task = compaction_job.Run(status, task_ptr);
     while (!task.resume()) {
       co_yield 0;
     }

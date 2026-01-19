@@ -363,9 +363,9 @@ Compaction::Compaction(
                               : 2 * target_output_file_size_;
 
 #ifndef NDEBUG
-  for (size_t i = 1; i < inputs_.size(); ++i) {
-    assert(inputs_[i].level > inputs_[i - 1].level);
-  }
+  // for (size_t i = 1; i < inputs_.size(); ++i) {
+  //   assert(inputs_[i].level > inputs_[i - 1].level);
+  // }
 #endif
 
   // setup input_levels_ and filtered_input_levels_

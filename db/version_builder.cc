@@ -256,7 +256,6 @@ class VersionBuilder::Rep {
   const ImmutableCFOptions* const ioptions_;
   TableCache* table_cache_;
   VersionStorageInfo* base_vstorage_;
-  mutable std::vector<std::vector<Segment*>> base_segment_;
   mutable bool has_new_versionedit;
   mutable bool has_base_segemnt_trush;
   VersionSet* version_set_;
@@ -834,6 +833,20 @@ class VersionBuilder::Rep {
     return base_vstorage_->GetFileLocation(file_number).GetLevel();
   }
 
+  int GetCurrentSegmentLevelForTableFile(uint64_t file_number) const {
+    auto it = table_file_levels_.find(file_number);
+    if (it != table_file_levels_.end()) {
+      return it->second;
+    }
+
+    assert(base_vstorage_);
+    auto segment_id = base_vstorage_->GetFileInWhichSegment(file_number);
+    if (segment_id == (uint64_t)-1) {
+      return VersionStorageInfo::FileLocation::Invalid().GetLevel();
+    }
+    return base_vstorage_->GetSegmentLocationById(segment_id).GetLevel();
+  }
+
   uint64_t GetOldestBlobFileNumberForTableFile(int level,
                                                uint64_t file_number) const {
     assert(level < num_levels_);
@@ -858,7 +871,8 @@ class VersionBuilder::Rep {
   Status ApplyFileDeletion(int level, uint64_t file_number) {
     assert(level != VersionStorageInfo::FileLocation::Invalid().GetLevel());
 
-    const int current_level = GetCurrentLevelForTableFile(file_number);
+    // const int current_level = GetCurrentLevelForTableFile(file_number);
+    const int current_level = GetCurrentSegmentLevelForTableFile(file_number);
 
     if (level != current_level) {
       if (level >= num_levels_) {
@@ -1526,6 +1540,9 @@ class VersionBuilder::Rep {
   Segment* CreateSegment(
       const std::vector<std::pair<FileMetaData*, int>>& files, int begin,
       int end, const InternalKeyComparator* cmp) const {
+    if (begin >= end) {
+      return nullptr;
+    }
     std::map<int, int> levels_map;
     for (int i = begin; i < end; ++i) {
       levels_map[files[i].second];
@@ -1576,8 +1593,8 @@ class VersionBuilder::Rep {
 
   void MergeAndSplitSegments(VersionStorageInfo* vstorage,
                              std::vector<Segment*>& base_segments, size_t level,
-                             const std::vector<uint64_t>& new_files_in_top,
-                             const std::vector<uint64_t>& new_files_in_bottom,
+                             std::vector<uint64_t>& new_files_in_top,
+                             std::vector<uint64_t>& new_files_in_bottom,
                              const InternalKeyComparator* cmp) const {
     auto deleted_files = levels_[level].deleted_files;
     auto add_files = levels_[level].added_files;
@@ -1620,20 +1637,27 @@ class VersionBuilder::Rep {
               });
     // split segments
     size_t begin = 0;
+    size_t now_right_bound = 0;
     for (size_t i = 1; i < files.size(); ++i) {
-      auto& prev_file = files[i - 1];
+      auto& right_bound_file = files[now_right_bound];
       auto& now_file = files[i];
-      if (cmp->Compare(prev_file.first->largest, now_file.first->smallest) <
-          0) {
+      if (cmp->Compare(right_bound_file.first->largest,
+                       now_file.first->smallest) < 0) {
         // no overlap, split here
         auto new_segment = CreateSegment(files, begin, i, cmp);
         vstorage->AddSegment(level, new_segment);
-        begin = i;
+        now_right_bound = begin = i;
+      } else if (cmp->Compare(right_bound_file.first->largest,
+                              now_file.first->largest) < 0) {
+        now_right_bound = i;
       }
     }
     // last segment
     auto new_segment = CreateSegment(files, begin, files.size(), cmp);
     vstorage->AddSegment(level, new_segment);
+    base_segments.clear();
+    new_files_in_top.clear();
+    new_files_in_bottom.clear();
   }
 
   void SaveSegmentsTo(VersionStorageInfo* vstorage, size_t level) const {
@@ -1643,12 +1667,15 @@ class VersionBuilder::Rep {
     const auto& added_files_in_order = levels_[level].added_files_in_order;
     const auto& added_files_sign = levels_[level].compaction_added_files_sign;
 
-    bool changed[base_segments.size()];
+    bool has_deletion[base_segments.size()];
+    bool has_addition[base_segments.size()];
+    std::memset(has_deletion, 0, sizeof(has_deletion));
+    std::memset(has_addition, 0, sizeof(has_addition));
     // find all segments has deletion file
     for (auto i : del_files) {
-      auto segment_id = vstorage->GetFileInWhichSegment(i);
-      auto segment_loc = vstorage->GetSegmentLocationById(segment_id);
-      changed[segment_loc.GetPosition()] = true;
+      auto segment_id = base_vstorage_->GetFileInWhichSegment(i);
+      auto segment_loc = base_vstorage_->GetSegmentLocationById(segment_id);
+      has_deletion[segment_loc.GetPosition()] = true;
     }
 
     // sort added files by begin key
@@ -1663,7 +1690,6 @@ class VersionBuilder::Rep {
               });
     // merge added files and base segments
     size_t add_file_index = 0;
-    bool should_merge_next = false;
     std::vector<Segment*> segments_to_change;
     std::vector<uint64_t> new_files_in_top;
     std::vector<uint64_t> new_files_in_bottom;
@@ -1696,15 +1722,18 @@ class VersionBuilder::Rep {
             } else {
               new_files_in_top.push_back(now_added_file_id);
             }
-            // check whether need merge with next segment
-            if (i + 1 < base_segments.size()) {
-              if (icmp->Compare(added_file->largest,
-                                base_segments[i + 1]->smallest) > 0) {
-                // need merge with next segment
-                should_merge_next = true;
+            // check whether need merge with next segments
+            if (!has_addition[i]) {
+              has_addition[i] = true;
+              for (size_t j = i + 1; j < base_segments.size(); ++j) {
+                if (icmp->Compare(added_file->largest,
+                                  base_segments[j]->smallest) > 0) {
+                  has_addition[j] = true;
+                } else {
+                  break;
+                }
               }
             }
-            changed[i] = true;
           } else if (icmp->Compare(added_file->largest, segment_largest_key) >
                      0) {
             // out of segment range
@@ -1719,26 +1748,23 @@ class VersionBuilder::Rep {
                                      icmp, /* last */ true);
       // no deletion and addtion, and no need merge
       // just copy
-      if (!changed[i]) {
+      if (!has_addition[i] && !has_deletion[i]) {
         vstorage->AddSegment(level, base_segments[i]);
         continue;
       }
       // need change
       // so push into change list
       segments_to_change.push_back(base_segments[i]);
-      // if need merge with next segment
-      // work is deferred to next loop
-      // changed set to true in order to skip copy
-      if (should_merge_next) {
-        should_merge_next = false;
-        changed[i + 1] = true;
-        continue;
+      // only merge when this is the last segment in merge chain or just has
+      // deletion
+      if (i + 1 >= base_segments.size() || !has_addition[i + 1] ||
+          has_deletion[i]) {
+        // sort by insertion time (just id itself)
+        sort(new_files_in_top.begin(), new_files_in_top.end());
+        sort(new_files_in_bottom.begin(), new_files_in_bottom.end());
+        MergeAndSplitSegments(vstorage, segments_to_change, level,
+                              new_files_in_top, new_files_in_bottom, icmp);
       }
-      // sort by insertion time (just id itself)
-      sort(new_files_in_top.begin(), new_files_in_top.end());
-      sort(new_files_in_bottom.begin(), new_files_in_bottom.end());
-      MergeAndSplitSegments(vstorage, segments_to_change, level,
-                            new_files_in_top, new_files_in_bottom, icmp);
     }
     // file after last segment
     while (add_file_index < ordered_add_files.size()) {

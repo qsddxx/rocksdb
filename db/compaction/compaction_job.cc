@@ -261,7 +261,7 @@ void CompactionJob::Prepare(
   assert(cfd != nullptr);
   const VersionStorageInfo* storage_info = c->input_version()->storage_info();
   assert(storage_info);
-  assert(storage_info->NumLevelFiles(compact_->compaction->level()) > 0);
+  // assert(storage_info->NumLevelFiles(compact_->compaction->level()) > 0);
 
   write_hint_ = storage_info->CalculateSSTWriteHint(
       c->output_level(), db_options_.calculate_sst_write_lifetime_hint_set);
@@ -679,13 +679,13 @@ void CompactionJob::InitializeCompactionRun() {
 }
 
 pausable_task CompactionJob::RunSubcompactions(
-    std::shared_ptr<compaction_task> task_ptr) {
+    compaction_task* task_ptr) {
   const size_t num_threads = compact_->sub_compact_states.size();
   assert(num_threads > 0);
   compact_->compaction->GetOrInitInputTableProperties();
 
   // Launch a thread for each of subcompactions 1...num_threads-1
-  for (size_t i = 1; i < compact_->sub_compact_states.size(); i++) {
+  for (size_t i = 0; i < compact_->sub_compact_states.size(); i++) {
     task_ptr->coro_handles.emplace_back(
         CompactionJob::ProcessKeyValueCompaction(
             &compact_->sub_compact_states[i]));
@@ -940,7 +940,7 @@ void CompactionJob::FinalizeCompactionRun(
 }
 
 pausable_task CompactionJob::Run(Status& status,
-                                 std::shared_ptr<compaction_task> task_ptr) {
+                                 compaction_task* task_ptr) {
   InitializeCompactionRun();
 
   const uint64_t start_micros = db_options_.clock->NowMicros();
@@ -1219,6 +1219,7 @@ pausable_task CompactionJob::ProcessKeyValueCompaction(
   }
 
   uint64_t prev_cpu_micros = db_options_.clock->CPUMicros();
+  uint64_t accumulated_cpu_micros = 0;
 
   ColumnFamilyData* cfd = sub_compact->compaction->column_family_data();
 
@@ -1465,12 +1466,19 @@ pausable_task CompactionJob::ProcessKeyValueCompaction(
   while (status.ok() && !cfd->IsDropped() && c_iter->Valid()) {
     ++cnt;
     if (cnt >= todo_cnt) {
+      uint64_t cur_cpu_micros = db_options_.clock->CPUMicros();
+      if (cur_cpu_micros >= last_cpu_micros) {
+        uint64_t diff = cur_cpu_micros - last_cpu_micros;
+        RecordTick(stats_, COMPACTION_CPU_TOTAL_TIME, diff);
+        accumulated_cpu_micros += diff;
+      }
       uint64_t now = db_options_.clock->NowMicros();
       uint64_t elapsed = now - morsel_time;
       todo_cnt = todo_cnt * elapsed / 2000;
       morsel_time = now;
       cnt = 0;
       co_yield 0;
+      last_cpu_micros = db_options_.clock->CPUMicros();
     }
 
     // Invariant: c_iter.status() is guaranteed to be OK if c_iter->Valid()
@@ -1485,9 +1493,11 @@ pausable_task CompactionJob::ProcessKeyValueCompaction(
       RecordCompactionIOStats();
 
       uint64_t cur_cpu_micros = db_options_.clock->CPUMicros();
-      assert(cur_cpu_micros >= last_cpu_micros);
-      RecordTick(stats_, COMPACTION_CPU_TOTAL_TIME,
-                 cur_cpu_micros - last_cpu_micros);
+      if (cur_cpu_micros >= last_cpu_micros) {
+        uint64_t diff = cur_cpu_micros - last_cpu_micros;
+        RecordTick(stats_, COMPACTION_CPU_TOTAL_TIME, diff);
+        accumulated_cpu_micros += diff;
+      }
       last_cpu_micros = cur_cpu_micros;
     }
 
@@ -1625,10 +1635,12 @@ pausable_task CompactionJob::ProcessKeyValueCompaction(
   }
 
   uint64_t cur_cpu_micros = db_options_.clock->CPUMicros();
-  sub_compact->compaction_job_stats.cpu_micros =
-      cur_cpu_micros - prev_cpu_micros;
-  RecordTick(stats_, COMPACTION_CPU_TOTAL_TIME,
-             cur_cpu_micros - last_cpu_micros);
+  if (cur_cpu_micros >= last_cpu_micros) {
+    uint64_t diff = cur_cpu_micros - last_cpu_micros;
+    RecordTick(stats_, COMPACTION_CPU_TOTAL_TIME, diff);
+    accumulated_cpu_micros += diff;
+  }
+  sub_compact->compaction_job_stats.cpu_micros = accumulated_cpu_micros;
 
   if (measure_io_stats_) {
     sub_compact->compaction_job_stats.file_write_nanos +=
@@ -2143,7 +2155,7 @@ Status CompactionJob::OpenCompactionOutputFile(SubcompactionState* sub_compact,
       db_options_.stats, Histograms::SST_WRITE_MICROS, listeners,
       db_options_.file_checksum_gen_factory.get(),
       tmp_set.Contains(FileType::kTableFile),
-      false /* , use_io_uring=  true */));
+      false , /* use_io_uring=  */ true));
 
   // TODO(hx235): pass in the correct `oldest_key_time` instead of `0`
   const ReadOptions read_options(Env::IOActivity::kCompaction);

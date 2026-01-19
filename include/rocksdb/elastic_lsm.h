@@ -10,6 +10,7 @@ namespace ROCKSDB_NAMESPACE
     int min_tp_threads = 2;
     int min_ap_threads = 2;
     int min_compaction_threads = 2;
+    int max_tp_task_queue = 1024;
     int max_compaction_num = 32;
   };
   class ElasticLSM

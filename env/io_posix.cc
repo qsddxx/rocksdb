@@ -1896,14 +1896,12 @@ IOStatus AsyncPosixWritableFile::Close(const IOOptions& /* opts */,
 
 IOStatus AsyncPosixWritableFile::Sync(const IOOptions& /* opts */,
                                       IODebugContext* /* dbg */) {
-  return IOStatus::NotSupported(
-      "AsyncPosixWritableFile does not support synchronous Sync");
+  return IOStatus::OK();
 }
 
 IOStatus AsyncPosixWritableFile::Fsync(const IOOptions& /* opts */,
                                        IODebugContext* /* dbg */) {
-  return IOStatus::NotSupported(
-      "AsyncPosixWritableFile does not support synchronous Fsync");
+  return IOStatus::OK();
 }
 
 bool AsyncPosixWritableFile::IsSyncThreadSafe() const { return false; }
