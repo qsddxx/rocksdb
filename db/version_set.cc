@@ -3175,6 +3175,7 @@ namespace {
 // Static counter to track version changes for debug output
 static std::atomic<uint64_t> version_change_counter{0};
 
+#ifndef NDEBUG
 // Debug print function for VersionStorageInfo
 // Prints files and segments information in a readable format
 // Segments are cross-layer structures that span multiple sub-levels
@@ -3269,6 +3270,7 @@ std::string PrintVersionStorageDebug(const VersionStorageInfo* vstorage,
   output.append("================================================\n");
   return output;
 }
+#endif
 
 }  // anonymous namespace
 

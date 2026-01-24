@@ -26,39 +26,49 @@ namespace ROCKSDB_NAMESPACE
       const std::string& name, std::unique_ptr<ElasticLSM>* dbptr);
 
     virtual Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
-      const Slice& key, const Slice& value) = 0;
-    Status Put(const WriteOptions& options, const Slice& key, const Slice& value) {
-      return Put(options, DefaultColumnFamily(), key, value);
+      const Slice& key, const Slice& value,
+      std::function<void()>* callback) = 0;
+    Status Put(const WriteOptions& options, const Slice& key, const Slice& value,
+      std::function<void()>* callback) {
+      return Put(options, DefaultColumnFamily(), key, value, callback);
     }
 
     virtual Status Delete(const WriteOptions& options,
       ColumnFamilyHandle* column_family,
-      const Slice& key) = 0;
-    Status Delete(const WriteOptions& options, const Slice& key) {
-      return Delete(options, DefaultColumnFamily(), key);
+      const Slice& key,
+      std::function<void()>* callback) = 0;
+    Status Delete(const WriteOptions& options, const Slice& key,
+      std::function<void()>* callback) {
+      return Delete(options, DefaultColumnFamily(), key, callback);
     }
 
     virtual Status Update(const WriteOptions& options, ColumnFamilyHandle* column_family,
-      const Slice& key, const Slice& value) = 0;
+      const Slice& key, const Slice& value,
+      std::function<void()>* callback) = 0;
     Status Update(const WriteOptions& options,
-      const Slice& key, const Slice& value) {
-      return Update(options, DefaultColumnFamily(), key, value);
+      const Slice& key, const Slice& value,
+      std::function<void()>* callback) {
+      return Update(options, DefaultColumnFamily(), key, value, callback);
     }
 
     virtual Status Get(const ReadOptions& _read_options,
       ColumnFamilyHandle* column_family, const Slice& key,
-      std::string* value) = 0;
+      std::string* value,
+      std::function<void()>* callback) = 0;
     Status Get(const ReadOptions& _read_options, const Slice& key,
-      std::string* value) {
-      return Get(_read_options, DefaultColumnFamily(), key, value);
+      std::string* value,
+      std::function<void()>* callback) {
+      return Get(_read_options, DefaultColumnFamily(), key, value, callback);
     }
 
     virtual Status Scan(const ReadOptions& _read_options,
       ColumnFamilyHandle* column_family, const Slice &key, int record_count,
-      std::vector<std::string>* answer) = 0;
+      std::vector<std::string>* answer,
+      std::function<void()>* callback) = 0;
     Status Scan(const ReadOptions& _read_options, const Slice &key, int record_count,
-      std::vector<std::string>* answer) {
-      return Scan(_read_options, DefaultColumnFamily(), key, record_count, answer);
+      std::vector<std::string>* answer,
+      std::function<void()>* callback) {
+      return Scan(_read_options, DefaultColumnFamily(), key, record_count, answer, callback);
     }
 
     virtual ColumnFamilyHandle* DefaultColumnFamily() const = 0;

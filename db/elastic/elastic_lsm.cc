@@ -137,42 +137,46 @@ void ElasticLSMImpl::StartThreads() {
 
 Status ElasticLSMImpl::Put(const WriteOptions& options,
                            ColumnFamilyHandle* column_family, const Slice& key,
-                           const Slice& value) {
-  auto t = new put_task(options, column_family, key, value);
+                           const Slice& value,
+                           std::function<void()>* callback) {
+  auto t = new put_task(options, column_family, key, value, callback);
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
 
 Status ElasticLSMImpl::Delete(const WriteOptions& options,
                               ColumnFamilyHandle* column_family,
-                              const Slice& key) {
-  auto t = new delete_task(options, column_family, key);
+                              const Slice& key,
+                              std::function<void()>* callback) {
+  auto t = new delete_task(options, column_family, key, callback);
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
 
 Status ElasticLSMImpl::Update(const WriteOptions& options,
                               ColumnFamilyHandle* column_family,
-                              const Slice& key, const Slice& value) {
-  auto t = new update_task(options, column_family, key, value);
+                              const Slice& key, const Slice& value,
+                              std::function<void()>* callback) {
+  auto t = new update_task(options, column_family, key, value, callback);
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
 
 Status ElasticLSMImpl::Get(const ReadOptions& _read_options,
                            ColumnFamilyHandle* column_family, const Slice& key,
-                           std::string* value) {
-  auto t = new get_task(_read_options, column_family, key, value);
+                           std::string* value,
+                           std::function<void()>* callback) {
+  auto t = new get_task(_read_options, column_family, key, value, callback);
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
 
 Status ElasticLSMImpl::Scan(const ReadOptions& _read_options,
                             ColumnFamilyHandle* column_family, const Slice& key,
-                            int record_count,
-                            std::vector<std::string>* answer) {
-  auto t =
-      new scan_task(_read_options, column_family, key, record_count, answer);
+                            int record_count, std::vector<std::string>* answer,
+                            std::function<void()>* callback) {
+  auto t = new scan_task(_read_options, column_family, key, record_count,
+                         answer, callback);
   tp_task_queue_.blockingWrite(t);
   return Status::OK();
 }
@@ -226,6 +230,9 @@ void ElasticLSMImpl::TPTask() {
       }
       default:
         break;
+    }
+    if (task->callback != nullptr && s.ok()) {
+      (*task->callback)();
     }
     delete task;
     task_cnt++;
@@ -505,7 +512,7 @@ void ElasticLSMImpl::StrideSchedular::put_back_task() {
     to_reinsert_task_queue_.pop_front();
     auto& task = compaction_tasks_[idx];
     if (task != nullptr) {
-      if(task->priority > 0) {
+      if (task->priority > 0) {
         pass_[idx] += 1.0 / task->priority;
         global_pass_ = std::min(global_pass_, pass_[idx]);
       }

@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 
 namespace ROCKSDB_NAMESPACE {
 struct task {
@@ -7,14 +8,14 @@ struct task {
     TASK_TYPE_TP,
     TASK_TYPE_AP,
   } type;
-  task* prev_task;
-  task* next_task;
+  std::function<void()>* callback;
 
  public:
-  task(task_type _type = TASK_TYPE_NONE, task* _prev_task = nullptr,
-       task* _next_task = nullptr)
-      : type(_type), prev_task(_prev_task), next_task(_next_task) {}
-  virtual ~task() = default;
+  task(std::function<void()>* _callback = nullptr, task_type _type = TASK_TYPE_NONE)
+      : type(_type), callback(_callback) {}
+  virtual ~task() {
+    delete callback;
+  };
 };
 
 struct tp_task : public task {
@@ -28,10 +29,9 @@ struct tp_task : public task {
   } tp_type;
 
  public:
-  tp_task(tp_task_type _tp_type = TP_TASK_TYPE_NONE,
-          task_type _type = TASK_TYPE_TP, task* _prev_task = nullptr,
-          task* _next_task = nullptr)
-      : task(_type, _prev_task, _next_task), tp_type(_tp_type) {}
+  tp_task(std::function<void()>* _callback = nullptr,
+          tp_task_type _tp_type = TP_TASK_TYPE_NONE)
+      : task(_callback, TASK_TYPE_TP), tp_type(_tp_type) {}
   virtual ~tp_task() = default;
 };
 
@@ -44,9 +44,8 @@ struct put_task : public tp_task {
  public:
   put_task(const WriteOptions& _write_options,
            ColumnFamilyHandle* _column_family, const Slice& _key,
-           const Slice& _value, tp_task_type _tp_type = TP_TASK_TYPE_PUT,
-           task* _prev_task = nullptr, task* _next_task = nullptr)
-      : tp_task(_tp_type, TASK_TYPE_TP, _prev_task, _next_task),
+           const Slice& _value, std::function<void()>* _callback = nullptr)
+      : tp_task(_callback, TP_TASK_TYPE_PUT),
         write_options(_write_options),
         column_family(_column_family),
         key(_key),
@@ -61,9 +60,8 @@ struct delete_task : public tp_task {
  public:
   delete_task(const WriteOptions& _write_options,
               ColumnFamilyHandle* _column_family, const Slice& _key,
-              tp_task_type _tp_type = TP_TASK_TYPE_DELETE,
-              task* _prev_task = nullptr, task* _next_task = nullptr)
-      : tp_task(_tp_type, TASK_TYPE_TP, _prev_task, _next_task),
+              std::function<void()>* _callback = nullptr)
+      : tp_task(_callback, TP_TASK_TYPE_DELETE),
         write_options(_write_options),
         column_family(_column_family),
         key(_key) {}
@@ -76,11 +74,11 @@ struct update_task : public tp_task {
   const Slice& value;
 
  public:
-  update_task(const WriteOptions& _write_options,
-              ColumnFamilyHandle* _column_family, const Slice& _key,
-              const Slice& _value, tp_task_type _tp_type = TP_TASK_TYPE_UPDATE,
-              task* _prev_task = nullptr, task* _next_task = nullptr)
-      : tp_task(_tp_type, TASK_TYPE_TP, _prev_task, _next_task),
+  update_task(
+      const WriteOptions& _write_options, ColumnFamilyHandle* _column_family,
+      const Slice& _key, const Slice& _value,
+      std::function<void()>* _callback = nullptr)
+      : tp_task(_callback, TP_TASK_TYPE_UPDATE),
         write_options(_write_options),
         column_family(_column_family),
         key(_key),
@@ -94,11 +92,11 @@ struct get_task : public tp_task {
   std::string* value;
 
  public:
-  get_task(const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
-           const Slice& _key, std::string* _value,
-           tp_task_type _tp_type = TP_TASK_TYPE_GET, task* _prev_task = nullptr,
-           task* _next_task = nullptr)
-      : tp_task(_tp_type, TASK_TYPE_TP, _prev_task, _next_task),
+  get_task(
+      const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
+      const Slice& _key, std::string* _value,
+      std::function<void()>* _callback = nullptr)
+      : tp_task(_callback, TP_TASK_TYPE_GET),
         read_options(_read_options),
         column_family(_column_family),
         key(_key),
@@ -113,12 +111,11 @@ struct scan_task : public tp_task {
   std::vector<std::string>* answer;
 
  public:
-  scan_task(const ReadOptions& _read_options,
-            ColumnFamilyHandle* _column_family, const Slice& _key,
-            int _record_count, std::vector<std::string>* _answer,
-            tp_task_type _tp_type = TP_TASK_TYPE_SCAN,
-            task* _prev_task = nullptr, task* _next_task = nullptr)
-      : tp_task(_tp_type, TASK_TYPE_TP, _prev_task, _next_task),
+  scan_task(
+      const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
+      const Slice& _key, int _record_count, std::vector<std::string>* _answer,
+      std::function<void()>* _callback = nullptr)
+      : tp_task(_callback, TP_TASK_TYPE_SCAN),
         read_options(_read_options),
         column_family(_column_family),
         key(_key),
@@ -133,11 +130,12 @@ struct ap_task : public task {
   std::vector<std::string>* answer;
 
  public:
-  ap_task(const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
-          std::function<void(PinnableSlice*)> _func,
-          std::vector<std::string>* _answer, task_type _type = TASK_TYPE_AP,
-          task* _prev_task = nullptr, task* _next_task = nullptr)
-      : task(_type, _prev_task, _next_task),
+  ap_task(
+      const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
+      std::function<void(PinnableSlice*)>& _func,
+      std::vector<std::string>* _answer,
+      std::function<void()>* _callback = nullptr)
+      : task(_callback, TASK_TYPE_AP),
         read_options(_read_options),
         column_family(_column_family),
         func(_func),

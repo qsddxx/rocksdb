@@ -24,22 +24,29 @@ class ElasticLSMImpl : public ElasticLSM {
                      std::unique_ptr<ElasticLSM>* dbptr);
   void StartThreads();
 
-  Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
-             const Slice& key, const Slice& value) override;
+  Status Put(
+      const WriteOptions& options, ColumnFamilyHandle* column_family,
+      const Slice& key, const Slice& value,
+      std::function<void()>* callback) override;
 
-  Status Delete(const WriteOptions& options, ColumnFamilyHandle* column_family,
-                const Slice& key) override;
+  Status Delete(
+      const WriteOptions& options, ColumnFamilyHandle* column_family,
+      const Slice& key, std::function<void()>* callback) override;
 
-  Status Update(const WriteOptions& options, ColumnFamilyHandle* column_family,
-                const Slice& key, const Slice& value) override;
+  Status Update(
+      const WriteOptions& options, ColumnFamilyHandle* column_family,
+      const Slice& key, const Slice& value,
+      std::function<void()>* callback) override;
 
-  Status Get(const ReadOptions& _read_options,
-             ColumnFamilyHandle* column_family, const Slice& key,
-             std::string* value) override;
+  Status Get(
+      const ReadOptions& _read_options, ColumnFamilyHandle* column_family,
+      const Slice& key, std::string* value,
+      std::function<void()>* callback) override;
 
-  Status Scan(const ReadOptions& _read_options,
-              ColumnFamilyHandle* column_family, const Slice& key,
-              int record_count, std::vector<std::string>* answer) override;
+  Status Scan(
+      const ReadOptions& _read_options, ColumnFamilyHandle* column_family,
+      const Slice& key, int record_count, std::vector<std::string>* answer,
+      std::function<void()>* callback) override;
 
   ColumnFamilyHandle* DefaultColumnFamily() const override {
     return db_->DefaultColumnFamily();
@@ -81,7 +88,8 @@ class ElasticLSMImpl : public ElasticLSM {
   void ContinuousCompactionTask(int idx);
   pausable_task APTask();
   void BGWork(int idx);
-  void UpdateCQEMap(int compaction_id, std::shared_ptr<compaction_task> task, AsyncWriteOp* req = nullptr);
+  void UpdateCQEMap(int compaction_id, std::shared_ptr<compaction_task> task,
+                    AsyncWriteOp* req = nullptr);
   void CheckCQE();
   void BGSchedule();
 
