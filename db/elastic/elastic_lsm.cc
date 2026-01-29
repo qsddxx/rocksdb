@@ -94,7 +94,7 @@ ElasticLSMImpl::~ElasticLSMImpl() {
   schedule_count_.release();
 
   // Wait for all threads to finish
-  for (auto& t : worker_thread_pool_) {
+  for (auto& t : schedular_thread_pool_) {
     if (t.joinable()) {
       t.join();
     }
@@ -104,12 +104,12 @@ ElasticLSMImpl::~ElasticLSMImpl() {
       t.join();
     }
   }
-  for (auto& t : compaction_thread_pool_) {
+  for (auto& t : worker_thread_pool_) {
     if (t.joinable()) {
       t.join();
     }
   }
-  for (auto& t : schedular_thread_pool_) {
+  for (auto& t : compaction_thread_pool_) {
     if (t.joinable()) {
       t.join();
     }
@@ -323,8 +323,6 @@ void ElasticLSMImpl::UpdateCQEMap(int compaction_id,
   if (it->second.task != nullptr &&
       it->second.compaction_write_num_count != nullptr &&
       it->second.count == it->second.compaction_write_num_count->load()) {
-    std::printf("Compaction %d io_uring write done with %ld writes\n",
-                compaction_id, it->second.count);
     it->second.task->done_work->resume();
     delete it->second.compaction_write_num_count;
     cqe_task_map_.erase(it);
@@ -507,9 +505,7 @@ void ElasticLSMImpl::StrideSchedular::put_back_task() {
     global_pass_ = pass_[task_queue_.top()];
   else
     global_pass_ = std::numeric_limits<double>::max();
-  while (!to_reinsert_task_queue_.empty()) {
-    int idx = to_reinsert_task_queue_.front();
-    to_reinsert_task_queue_.pop_front();
+  for (auto idx : to_reinsert_task_queue_) {
     auto& task = compaction_tasks_[idx];
     if (task != nullptr) {
       if (task->priority > 0) {
@@ -519,6 +515,7 @@ void ElasticLSMImpl::StrideSchedular::put_back_task() {
       task_queue_.push(idx);
     }
   }
+  to_reinsert_task_queue_.clear();
   if (global_pass_ == std::numeric_limits<double>::max()) {
     global_pass_ = 0;
   }

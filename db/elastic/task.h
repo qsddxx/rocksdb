@@ -38,8 +38,8 @@ struct tp_task : public task {
 struct put_task : public tp_task {
   const WriteOptions& write_options;
   ColumnFamilyHandle* column_family;
-  const Slice& key;
-  const Slice& value;
+  const Slice key;
+  const Slice value;
 
  public:
   put_task(const WriteOptions& _write_options,
@@ -55,7 +55,7 @@ struct put_task : public tp_task {
 struct delete_task : public tp_task {
   const WriteOptions& write_options;
   ColumnFamilyHandle* column_family;
-  const Slice& key;
+  const Slice key;
 
  public:
   delete_task(const WriteOptions& _write_options,
@@ -70,8 +70,8 @@ struct delete_task : public tp_task {
 struct update_task : public tp_task {
   const WriteOptions& write_options;
   ColumnFamilyHandle* column_family;
-  const Slice& key;
-  const Slice& value;
+  const Slice key;
+  const Slice value;
 
  public:
   update_task(
@@ -88,7 +88,7 @@ struct update_task : public tp_task {
 struct get_task : public tp_task {
   const ReadOptions& read_options;
   ColumnFamilyHandle* column_family;
-  const Slice& key;
+  const Slice key;
   std::string* value;
 
  public:
@@ -106,7 +106,7 @@ struct get_task : public tp_task {
 struct scan_task : public tp_task {
   const ReadOptions& read_options;
   ColumnFamilyHandle* column_family;
-  const Slice& key;
+  const Slice key;
   int record_count;
   std::vector<std::string>* answer;
 

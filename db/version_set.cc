@@ -4140,14 +4140,14 @@ void VersionStorageInfo::SetFinalized() {
 }
 
 void VersionStorageInfo::UpdateNumNonEmptyLevels() {
-  num_non_empty_levels_ = num_levels_;
-  for (int i = num_levels_ - 1; i >= 0; i--) {
-    if (files_[i].size() != 0) {
-      break;
-    } else {
-      num_non_empty_levels_ = i;
-    }
-  }
+  // num_non_empty_levels_ = num_levels_;
+  // for (int i = num_levels_ - 1; i >= 0; i--) {
+  //   if (files_[i].size() != 0) {
+  //     break;
+  //   } else {
+  //     num_non_empty_levels_ = i;
+  //   }
+  // }
   num_non_empty_segments_levels_ = num_segments_levels_;
   for (int i = num_segments_levels_ - 1; i >= 0; i--) {
     if (segments_[i].size() != 0) {
@@ -7327,7 +7327,7 @@ InternalIterator* VersionSet::MakeInputIterator(
   // Level-0 files have to be merged together.  For other levels,
   // we will make a concatenating iterator per level.
   // TODO(opt): use concatenating iterator for level-0 if there is no overlap
-  const size_t space = (c->level() == 0 ? c->input_levels(0)->num_files +
+  const size_t space = (c->level() == 0 && false ? c->input_levels(0)->num_files +
                                               c->num_input_levels() - 1
                                         : c->num_input_levels());
   InternalIterator** list = new InternalIterator*[space];
@@ -7345,7 +7345,7 @@ InternalIterator* VersionSet::MakeInputIterator(
     const LevelFilesBrief* flevel = c->input_levels(which);
     num_input_files += flevel->num_files;
     if (flevel->num_files != 0) {
-      if (c->level(which) == 0) {
+      if (c->level(which) == 0 && false) {
         for (size_t i = 0; i < flevel->num_files; i++) {
           const FileMetaData& fmd = *flevel->files[i].file_metadata;
           if (start.has_value() &&

@@ -713,21 +713,23 @@ class VersionStorageInfo {
   }
 
   void GenerateFiles() {
+    num_non_empty_levels_ = 0;
     for (int i = 0; i < num_segments_levels_; i++) {
+      int now_level_count = 0;
       for (auto& s : segments_[i]) {
-        assert(s->files_.size() <= (size_t)level_per_segment_level_);
+        now_level_count = std::max(now_level_count, (int)s->files_.size());
         for (size_t j = 0; j < s->files_.size(); j++) {
           for (auto f : s->files_[j]) {
-            AddFile(i * level_per_segment_level_ + j, f);
+            AddFile(num_non_empty_levels_ + j, f);
             segments_level_file_counts_[i]++;
             segments_level_file_sizes_[i] +=
                 f->fd.GetFileSize();
           }
         }
       }
+      num_non_empty_levels_ += now_level_count;
     }
     num_levels_ = num_segments_levels_ * level_per_segment_level_;
-    num_non_empty_levels_ = num_levels_;
     files_by_compaction_pri_.resize(num_levels_);
     // next_file_to_compact_by_size_.resize(num_levels_);
     // compaction_score_.resize(num_levels_);

@@ -155,7 +155,7 @@ std::vector<CompactionInputFiles> Compaction::PopulateWithAtomicBoundaries(
     VersionStorageInfo* vstorage, std::vector<CompactionInputFiles> inputs) {
   const Comparator* ucmp = vstorage->InternalComparator()->user_comparator();
   for (size_t i = 0; i < inputs.size(); i++) {
-    if (inputs[i].level == 0 || inputs[i].files.empty()) {
+    if ((inputs[i].level == 0 && false) || inputs[i].files.empty()) {
       continue;
     }
     inputs[i].atomic_compaction_unit_boundaries.reserve(inputs[i].files.size());

@@ -24,29 +24,25 @@ class ElasticLSMImpl : public ElasticLSM {
                      std::unique_ptr<ElasticLSM>* dbptr);
   void StartThreads();
 
-  Status Put(
-      const WriteOptions& options, ColumnFamilyHandle* column_family,
-      const Slice& key, const Slice& value,
-      std::function<void()>* callback) override;
+  Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
+             const Slice& key, const Slice& value,
+             std::function<void()>* callback) override;
 
-  Status Delete(
-      const WriteOptions& options, ColumnFamilyHandle* column_family,
-      const Slice& key, std::function<void()>* callback) override;
+  Status Delete(const WriteOptions& options, ColumnFamilyHandle* column_family,
+                const Slice& key, std::function<void()>* callback) override;
 
-  Status Update(
-      const WriteOptions& options, ColumnFamilyHandle* column_family,
-      const Slice& key, const Slice& value,
-      std::function<void()>* callback) override;
+  Status Update(const WriteOptions& options, ColumnFamilyHandle* column_family,
+                const Slice& key, const Slice& value,
+                std::function<void()>* callback) override;
 
-  Status Get(
-      const ReadOptions& _read_options, ColumnFamilyHandle* column_family,
-      const Slice& key, std::string* value,
-      std::function<void()>* callback) override;
+  Status Get(const ReadOptions& _read_options,
+             ColumnFamilyHandle* column_family, const Slice& key,
+             std::string* value, std::function<void()>* callback) override;
 
-  Status Scan(
-      const ReadOptions& _read_options, ColumnFamilyHandle* column_family,
-      const Slice& key, int record_count, std::vector<std::string>* answer,
-      std::function<void()>* callback) override;
+  Status Scan(const ReadOptions& _read_options,
+              ColumnFamilyHandle* column_family, const Slice& key,
+              int record_count, std::vector<std::string>* answer,
+              std::function<void()>* callback) override;
 
   ColumnFamilyHandle* DefaultColumnFamily() const override {
     return db_->DefaultColumnFamily();
@@ -168,7 +164,13 @@ class ElasticLSMImpl : public ElasticLSM {
   class StrideSchedular {
    public:
     StrideSchedular(ElasticLSMImpl* elastic_lsm)
-        : elastic_lsm_(elastic_lsm), task_queue_(priority_cmp(this)) {}
+        : elastic_lsm_(elastic_lsm), task_queue_(priority_cmp(this), [] {
+            std::vector<int> v;
+            v.reserve(SLOT_NUM);
+            return v;
+          }()) {
+      to_reinsert_task_queue_.reserve(SLOT_NUM);
+    }
     // notice worker a new task is available
     void NewTask(int idx) { new_task_mask_.fetch_or(1 << idx); }
     // synchronize new tasks
@@ -195,7 +197,7 @@ class ElasticLSMImpl : public ElasticLSM {
     };
     friend class priority_cmp;
     std::priority_queue<int, std::vector<int>, priority_cmp> task_queue_;
-    std::list<int> to_reinsert_task_queue_;
+    std::vector<int> to_reinsert_task_queue_;
 
     void remove_done_work(int idx);
     bool docompaction(bool highpriority);
