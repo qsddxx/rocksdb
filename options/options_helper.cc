@@ -199,6 +199,7 @@ void BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.compaction_service = immutable_db_options.compaction_service;
   options.calculate_sst_write_lifetime_hint_set =
       immutable_db_options.calculate_sst_write_lifetime_hint_set;
+  options.compaction_morsel_size = immutable_db_options.compaction_morsel_size;
 }
 
 ColumnFamilyOptions BuildColumnFamilyOptions(
@@ -340,6 +341,7 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
       ioptions.persist_user_defined_timestamps;
   cf_opts->default_temperature = ioptions.default_temperature;
   cf_opts->cf_allow_ingest_behind = ioptions.cf_allow_ingest_behind;
+  cf_opts->level_per_segment_level = ioptions.level_per_segment_level;
 
   // TODO(yhchiang): find some way to handle the following derived options
   // * max_file_size

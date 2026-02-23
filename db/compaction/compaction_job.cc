@@ -1474,7 +1474,10 @@ pausable_task CompactionJob::ProcessKeyValueCompaction(
       }
       uint64_t now = db_options_.clock->NowMicros();
       uint64_t elapsed = now - morsel_time;
-      todo_cnt = todo_cnt * elapsed / 200000;
+      if (elapsed == 0) {
+        elapsed = 1;
+      }
+      todo_cnt = todo_cnt * db_options_.compaction_morsel_size / elapsed;
       morsel_time = now;
       cnt = 0;
       co_yield 0;

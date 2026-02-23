@@ -897,6 +897,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableCFOptions, cf_allow_ingest_behind),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"level_per_segment_level",
+         {offsetof(struct ImmutableCFOptions, level_per_segment_level),
+          OptionType::kInt32T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
 };
 
 const std::string OptionsHelper::kCFOptionsName = "ColumnFamilyOptions";

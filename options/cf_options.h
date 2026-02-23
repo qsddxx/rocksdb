@@ -87,7 +87,9 @@ struct ImmutableCFOptions {
 
   int level_per_segment_level;
   
-  std::vector<int> level_segment_max_sorted_run_num{3,3,4,4,4,4,4};
+  std::vector<int> level_segment_max_sorted_run_num{3,1,1,1,1,1,4};
+
+  std::vector<int> level_segment_max_file_num{4,2,5,5,5,5,5};
 };
 
 struct ImmutableOptions : public ImmutableDBOptions, public ImmutableCFOptions {

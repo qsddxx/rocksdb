@@ -3625,11 +3625,10 @@ void VersionStorageInfo::ComputeCompactionScore(
       if (segment_->being_compacted) {
         continue;
       }
-      int segment_level = segment_->files_.size();
-      if (segment_level >=
-          immutable_options.level_segment_max_sorted_run_num[i]) {
-        double score = 1.0 * segment_level /
-                       immutable_options.level_segment_max_sorted_run_num[i];
+      if (segment_->file_num_ >=
+          immutable_options.level_segment_max_file_num[i]) {
+        double score = 1.0 * segment_->file_num_ /
+                       immutable_options.level_segment_max_file_num[i];
         compaction_segment_score_.emplace_back(score, segment_->segment_id_);
       }
     }

@@ -1,14 +1,13 @@
 #pragma once
 
 #include <folly/MPMCQueue.h>
-#include <folly/coro/Coroutine.h>
-#include <folly/coro/Task.h>
 
 #include <bit>
 #include <semaphore>
 
 #include "db/db_impl/db_impl.h"
 #include "db/elastic/task.h"
+#include "db/elastic/task_pool.h"
 #include "liburing.h"
 #include "rocksdb/elastic_lsm.h"
 
@@ -22,7 +21,12 @@ class ElasticLSMImpl : public ElasticLSM {
                      const ElasticLSMOptions& elastic_options,
                      const std::string& dbname,
                      std::unique_ptr<ElasticLSM>* dbptr);
-  void StartThreads();
+  static Status Open(const DBOptions& db_options,
+                     const ElasticLSMOptions& elastic_options,
+                     const std::string& dbname,
+                     const std::vector<ColumnFamilyDescriptor>& column_families,
+                     std::vector<ColumnFamilyHandle*>* handles,
+                     std::unique_ptr<ElasticLSM>* dbptr);
 
   Status Put(const WriteOptions& options, ColumnFamilyHandle* column_family,
              const Slice& key, const Slice& value,
@@ -31,8 +35,9 @@ class ElasticLSMImpl : public ElasticLSM {
   Status Delete(const WriteOptions& options, ColumnFamilyHandle* column_family,
                 const Slice& key, std::function<void()>* callback) override;
 
-  Status Update(const WriteOptions& options, ColumnFamilyHandle* column_family,
-                const Slice& key, const Slice& value,
+  Status Update(const ReadOptions& _read_options, const WriteOptions& options,
+                ColumnFamilyHandle* column_family, const Slice& key,
+                std::string* value, std::function<bool()>* mid_callback,
                 std::function<void()>* callback) override;
 
   Status Get(const ReadOptions& _read_options,
@@ -40,8 +45,8 @@ class ElasticLSMImpl : public ElasticLSM {
              std::string* value, std::function<void()>* callback) override;
 
   Status Scan(const ReadOptions& _read_options,
-              ColumnFamilyHandle* column_family, const Slice& key,
-              int record_count, std::vector<std::string>* answer,
+              ColumnFamilyHandle* column_family, 
+              std::function<void(rocksdb::Iterator *)>* func,
               std::function<void()>* callback) override;
 
   ColumnFamilyHandle* DefaultColumnFamily() const override {
@@ -58,7 +63,8 @@ class ElasticLSMImpl : public ElasticLSM {
   std::vector<std::thread> schedular_thread_pool_;
   SystemClock* clock_;
   // tp related
-  folly::MPMCQueue<tp_task*> tp_task_queue_;
+  TPTaskPool tp_task_pool_;
+  folly::MPMCQueue<std::pair<tp_task::tp_task_type, int>> tp_task_queue_;
   std::counting_semaphore<> tp_task_num{0};
   std::atomic<int> tp_working_threads_num{0};
   std::atomic<int> tp_throughput_{200};
@@ -70,6 +76,8 @@ class ElasticLSMImpl : public ElasticLSM {
   std::atomic<int> compaction_schedule_count_{0};
   folly::MPMCQueue<int> compaction_done_work_queue_;
   std::atomic<int> compaction_done_work_count_{0};
+  std::mutex compaction_mutex_;
+  std::condition_variable compaction_cv_;
   // io_uring related
   io_uring* ring_;
   struct cqe_task {
@@ -78,10 +86,11 @@ class ElasticLSMImpl : public ElasticLSM {
     std::atomic<uint64_t>* compaction_write_num_count;
   };
   std::unordered_map<int, cqe_task> cqe_task_map_;
+  void StartThreads();
   // functions for threads
-  void TPTask();
+  void TPTask(int idx);
   void ContinuousTPTask();
-  void ContinuousCompactionTask(int idx);
+  void ContinuousCompactionTask(int idx, bool flush);
   pausable_task APTask();
   void BGWork(int idx);
   void UpdateCQEMap(int compaction_id, std::shared_ptr<compaction_task> task,
@@ -127,7 +136,7 @@ class ElasticLSMImpl : public ElasticLSM {
       std::shared_ptr<compaction_task> task;
       int arrive_time;
       bool operator<(const unscheduled_task& other) const {
-        return arrive_time + task->priority <
+        return arrive_time + task->priority >
                other.arrive_time + other.task->priority;
       }
     };
@@ -163,8 +172,10 @@ class ElasticLSMImpl : public ElasticLSM {
 
   class StrideSchedular {
    public:
-    StrideSchedular(ElasticLSMImpl* elastic_lsm)
-        : elastic_lsm_(elastic_lsm), task_queue_(priority_cmp(this), [] {
+    StrideSchedular(ElasticLSMImpl* elastic_lsm, int idx_)
+        : elastic_lsm_(elastic_lsm),
+          local_idx_(idx_),
+          task_queue_(priority_cmp(this), [] {
             std::vector<int> v;
             v.reserve(SLOT_NUM);
             return v;
@@ -177,10 +188,11 @@ class ElasticLSMImpl : public ElasticLSM {
     void sync();
     // get lowest pass task, return true if work was done
     bool work();
-    bool compaction();
+    bool compaction(bool flush = true);
 
    private:
     ElasticLSMImpl* elastic_lsm_;
+    int local_idx_ = -1;
     double global_pass_ = 0;
     std::atomic<slotmask> new_task_mask_{0};
     slotmask active_task_mask_{0};
@@ -192,7 +204,7 @@ class ElasticLSMImpl : public ElasticLSM {
       StrideSchedular* schedular_;
       priority_cmp(StrideSchedular* schedular) : schedular_(schedular) {}
       bool operator()(int a, int b) const {
-        return schedular_->pass_[a] < schedular_->pass_[b];
+        return schedular_->pass_[a] > schedular_->pass_[b];
       }
     };
     friend class priority_cmp;
@@ -223,11 +235,11 @@ class ElasticLSMImpl : public ElasticLSM {
   }
 
   bool CalcIfNeedTP() const {
-    int num = tp_working_threads_num.load();
+    size_t num = tp_working_threads_num.load();
     if (num == 0) {
       return true;
     }
-    return tp_task_queue_.size() / num > tp_throughput_;
+    return tp_task_queue_.size() / num > (size_t)tp_throughput_;
   }
 
   friend class DBImpl;

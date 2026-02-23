@@ -108,6 +108,8 @@ struct ImmutableDBOptions {
   Temperature wal_write_temperature;
   CompactionStyleSet calculate_sst_write_lifetime_hint_set;
 
+  uint64_t compaction_morsel_size;
+
   // Beginning convenience/helper objects that are not part of the base
   // DBOptions
   std::shared_ptr<FileSystem> fs;

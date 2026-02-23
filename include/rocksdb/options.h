@@ -1672,6 +1672,9 @@ struct DBOptions {
   CompactionStyleSet calculate_sst_write_lifetime_hint_set = {
       CompactionStyle::kCompactionStyleLevel};
   // End EXPERIMENTAL
+  
+  // morsel size (microseconds)
+  uint64_t compaction_morsel_size = 2000;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)

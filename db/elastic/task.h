@@ -68,21 +68,29 @@ struct delete_task : public tp_task {
 };
 
 struct update_task : public tp_task {
+  const ReadOptions& read_options;
   const WriteOptions& write_options;
   ColumnFamilyHandle* column_family;
   const Slice key;
-  const Slice value;
+  std::string* value;
+  std::function<bool()>* mid_callback;
 
  public:
   update_task(
+      const ReadOptions& _read_options,
       const WriteOptions& _write_options, ColumnFamilyHandle* _column_family,
-      const Slice& _key, const Slice& _value,
+      const Slice& _key, std::string* _value, std::function<bool()>* _mid_callback = nullptr,
       std::function<void()>* _callback = nullptr)
       : tp_task(_callback, TP_TASK_TYPE_UPDATE),
+        read_options(_read_options),
         write_options(_write_options),
         column_family(_column_family),
         key(_key),
-        value(_value) {}
+        value(_value),
+        mid_callback(_mid_callback) {}
+  virtual ~update_task(){
+    delete mid_callback;
+  };
 };
 
 struct get_task : public tp_task {
@@ -103,24 +111,22 @@ struct get_task : public tp_task {
         value(_value) {}
 };
 
+class Iterator;
+
 struct scan_task : public tp_task {
   const ReadOptions& read_options;
   ColumnFamilyHandle* column_family;
-  const Slice key;
-  int record_count;
-  std::vector<std::string>* answer;
+  std::function<void(rocksdb::Iterator *)>* process_func;
 
  public:
   scan_task(
       const ReadOptions& _read_options, ColumnFamilyHandle* _column_family,
-      const Slice& _key, int _record_count, std::vector<std::string>* _answer,
+      std::function<void(rocksdb::Iterator *)>* _process_func,
       std::function<void()>* _callback = nullptr)
       : tp_task(_callback, TP_TASK_TYPE_SCAN),
         read_options(_read_options),
         column_family(_column_family),
-        key(_key),
-        record_count(_record_count),
-        answer(_answer) {}
+        process_func(_process_func) {}
 };
 
 struct ap_task : public task {
