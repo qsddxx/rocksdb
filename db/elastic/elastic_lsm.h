@@ -234,7 +234,7 @@ class ElasticLSMImpl : public ElasticLSM {
     schedule_count_.release();
   }
 
-  bool CalcIfNeedTP() const {
+  inline bool CalcIfNeedTP() const {
     size_t num = tp_working_threads_num.load();
     if (num == 0) {
       return true;

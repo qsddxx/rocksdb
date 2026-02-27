@@ -14,7 +14,7 @@ class task_pool {
     while (mask_[idx]) {
       idx = tail_.fetch_add(1, std::memory_order_relaxed) % size_;
     }
-    mask_[idx] = 1;
+    mask_[idx].store(1);
     T* ptr = reinterpret_cast<T*>(&pool_[idx]);
     new (ptr) T(std::forward<Args>(args)...);
     return idx;
@@ -24,14 +24,14 @@ class task_pool {
   void RemoveTask(int idx) {
     T* ptr = reinterpret_cast<T*>(&pool_[idx]);
     ptr->~T();
-    mask_[idx] = 0;
+    mask_[idx].store(0);
   }
 
  private:
   using storage = std::aligned_storage_t<sizeof(T), alignof(T)>;
   std::vector<storage> pool_;
-  std::vector<uint8_t> mask_;
-  int size_;
+  std::vector<std::atomic<uint8_t>> mask_;
+  uint32_t size_;
   std::atomic<int> tail_{0};
 };
 class TPTaskPool {

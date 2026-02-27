@@ -127,6 +127,9 @@ struct scan_task : public tp_task {
         read_options(_read_options),
         column_family(_column_family),
         process_func(_process_func) {}
+  virtual ~scan_task(){
+    delete process_func;
+  };
 };
 
 struct ap_task : public task {
